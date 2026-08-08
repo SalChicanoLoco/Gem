@@ -219,7 +219,14 @@ class TestSelfOptimizingVisualTrainer:
             target_score=50.0,
         )
         assert res["success"] is True
-        assert res["achieved_score"] >= 50.0
+
+        # The score must be a real measurement against the reference, not a
+        # value derived from the iteration or step count.
+        record = res["iterations"][0]
+        assert record["metric"] is not None
+        assert -1.0 <= record["ssim"] <= 1.0
+        assert -1.0 <= record["histogram_correlation"] <= 1.0
+        assert record["score"] == res["achieved_score"]
 
 
 class TestCleanHouse:

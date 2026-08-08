@@ -31,7 +31,7 @@ def main():
         print(f"  - Fine-Tuning Status: {res.get('fine_tuning', {}).get('message')}")
 
     print("\n[Deep Optimization] Running 30-Epoch Checkpoint Fine-Tuning...")
-    full_res = trainer.run_full_model_training(epochs=30)
+    full_res = trainer.run_full_model_training(max_steps=1200)
     print(f"\n🎉 Deep Model Training Complete!")
     print(f"   - Epochs: {full_res.get('epochs_completed')}")
     print(f"   - Loss: {full_res.get('final_loss')}")

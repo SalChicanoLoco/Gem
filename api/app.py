@@ -918,6 +918,7 @@ def create_app():
             raw_mode = data.get("raw_mode", False)
             model_id = data.get("model_id")
             quality_preset = data.get("quality_preset", False)
+            lora_path = data.get("lora_path")
             return jsonify(image_agent.diffusion_engine.generate(
                 prompt=prompt,
                 width=width,
@@ -927,6 +928,7 @@ def create_app():
                 raw_mode=raw_mode,
                 model_id=model_id,
                 quality_preset=quality_preset,
+                lora_path=lora_path,
             ))
         except Exception as e:
             return jsonify({"success": False, "error": str(e)}), 500
@@ -972,10 +974,8 @@ def create_app():
             if request.method == "POST":
                 data = request.get_json() or {}
                 target_speed = data.get("target_it_per_sec", 8.0)
-                min_quality = data.get("min_quality_score", 80.0)
                 return jsonify(edge_optimizer.run_self_optimization_loop(
                     target_it_per_sec=target_speed,
-                    min_quality_score=min_quality,
                 ))
             return jsonify(edge_optimizer.benchmark_profile())
         except Exception as e:
@@ -1033,9 +1033,11 @@ def create_app():
         try:
             data = request.get_json() or {}
             training_dir = data.get("training_dir", "static/training_data")
-            epochs = int(data.get("epochs", 5))
+            max_steps = int(data.get("max_steps", 200))
             lr = float(data.get("learning_rate", 1e-4))
-            res = visual_trainer.run_full_model_training(training_dir=training_dir, epochs=epochs, learning_rate=lr)
+            res = visual_trainer.run_full_model_training(
+                training_dir=training_dir, max_steps=max_steps, learning_rate=lr
+            )
             return jsonify(res)
         except Exception as e:
             return jsonify({"success": False, "error": str(e)}), 500

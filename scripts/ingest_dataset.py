@@ -51,7 +51,7 @@ def ingest_photo_concept_dataset(dataset_name: str = "bghira/photo-concept-bucke
     print("\n🧠 Executing SelfOptimizingVisualTrainer over photorealistic concept dataset...")
     res = trainer.run_full_model_training(
         training_dir=target_dir,
-        epochs=5,
+        max_steps=200,
     )
 
     print("=" * 65)

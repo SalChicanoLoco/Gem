@@ -23,13 +23,15 @@ class DistributedClusterManager:
 
     def __init__(self, primary_node_url: str = "http://localhost:5005"):
         self.primary_node_url = primary_node_url
+        # "unknown" until health_check() actually reaches the node. A hardcoded
+        # "online" would report a healthy cluster before anything was contacted.
         self.nodes: List[Dict[str, Any]] = [
             {
-                "node_id": "primary_macbook_pro",
+                "node_id": "primary",
                 "url": primary_node_url,
                 "role": "primary",
-                "status": "online",
-                "device": "Apple Silicon Metal (MPS)",
+                "status": "unknown",
+                "device": None,
             }
         ]
 
@@ -39,7 +41,9 @@ class DistributedClusterManager:
         # Check if already registered
         for n in self.nodes:
             if n["url"] == clean_url or n["node_id"] == node_id:
-                n["status"] = "online"
+                # Registration is a claim, not a health check; get_active_nodes
+                # is what establishes reachability.
+                n["status"] = "registered"
                 n["url"] = clean_url
                 return {"success": True, "message": f"Node '{node_id}' updated", "nodes": self.nodes}
 
@@ -47,8 +51,8 @@ class DistributedClusterManager:
             "node_id": node_id,
             "url": clean_url,
             "role": role,
-            "status": "online",
-            "device": "Peer Mac Metal (MPS)",
+            "status": "registered",
+            "device": None,
         }
         self.nodes.append(node_info)
         return {"success": True, "message": f"Registered node '{node_id}' at {clean_url}", "nodes": self.nodes}
@@ -57,9 +61,6 @@ class DistributedClusterManager:
         """Health check all registered cluster nodes and return online nodes."""
         active = []
         for n in self.nodes:
-            if n["role"] == "primary":
-                active.append(n)
-                continue
             try:
                 resp = requests.get(f"{n['url']}/", timeout=1.5)
                 if resp.status_code == 200:

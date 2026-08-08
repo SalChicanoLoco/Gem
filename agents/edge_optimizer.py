@@ -58,19 +58,23 @@ class EdgeDiffusionOptimizer:
             raw_mode=True,
         )
         elapsed = time.time() - start_time
-        it_per_sec = round(num_inference_steps / max(0.01, elapsed), 2)
 
-        # Quality scoring heuristic based on steps and rendering success
-        quality_score = min(98.0, round(70.0 + (num_inference_steps * 1.5), 1)) if res.get("success") else 0.0
+        # The engine clamps steps, so rate must be computed from the steps that
+        # actually ran, not the steps requested.
+        steps_used = res.get("steps_used", num_inference_steps)
+        it_per_sec = round(steps_used / max(0.01, elapsed), 2)
 
         return {
             "prompt": prompt,
-            "num_inference_steps": num_inference_steps,
+            "steps_requested": num_inference_steps,
+            "steps_used": steps_used,
             "enable_slicing": enable_slicing,
             "enable_tiling": enable_tiling,
             "elapsed_seconds": round(elapsed, 3),
             "iterations_per_second": it_per_sec,
-            "quality_score": quality_score,
+            # True when the pipeline could not load and a placeholder came back;
+            # such a profile is fast but meaningless, so it must not be selected.
+            "placeholder": bool(res.get("placeholder")),
             "device": self.diffusion.device,
             "engine": res.get("engine", "Unknown"),
             "filepath": res.get("filepath"),
@@ -79,7 +83,6 @@ class EdgeDiffusionOptimizer:
     def run_self_optimization_loop(
         self,
         target_it_per_sec: float = 8.0,
-        min_quality_score: float = 80.0,
         max_profiles: int = 4,
     ) -> Dict[str, Any]:
         """
@@ -110,27 +113,34 @@ class EdgeDiffusionOptimizer:
             profile["profile_id"] = f"profile_{idx+1}_steps_{steps}"
             profiles_tested.append(profile)
 
-            speed = profile["iterations_per_second"]
-            quality = profile["quality_score"]
+            # A placeholder render is fast because nothing was generated; it is
+            # not a candidate configuration.
+            if profile["placeholder"]:
+                continue
 
-            if quality >= min_quality_score and speed > highest_speed:
+            speed = profile["iterations_per_second"]
+            if speed > highest_speed:
                 highest_speed = speed
                 best_profile = profile
 
-        # Fallback to first profile if none met strict thresholds
-        if not best_profile and profiles_tested:
-            best_profile = profiles_tested[0]
+        if not best_profile:
+            return {
+                "success": False,
+                "error": "No profile produced a real render; nothing to optimize.",
+                "total_profiles_tested": len(profiles_tested),
+                "profiles_detail": profiles_tested,
+                "elapsed_seconds": round(time.time() - start_time, 2),
+            }
 
         # Save optimal edge configuration to disk
         optimal_config = {
             "last_optimized_timestamp": time.time(),
-            "optimal_steps": best_profile.get("num_inference_steps", 15) if best_profile else 15,
-            "optimal_iterations_per_second": best_profile.get("iterations_per_second", 5.0) if best_profile else 5.0,
-            "quality_score": best_profile.get("quality_score", 85.0) if best_profile else 85.0,
+            "optimal_steps": best_profile["steps_used"],
+            "optimal_iterations_per_second": best_profile["iterations_per_second"],
+            "measured_seconds_per_image": best_profile["elapsed_seconds"],
             "device": self.diffusion.device,
             "enable_attention_slicing": True,
             "enable_vae_tiling": True,
-            "status": "OPTIMIZED_FOR_EDGE_HARDWARE",
             "profiles_tested": len(profiles_tested),
         }
 

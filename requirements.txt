@@ -17,6 +17,9 @@ transformers>=4.40.0
 accelerate>=0.30.0
 safetensors>=0.4.0
 
+# LoRA fine-tuning of the diffusion UNet
+peft>=0.10.0
+
 # Process/port inspection for the CleanHouse pre-flight sweep
 psutil>=5.9.0
 

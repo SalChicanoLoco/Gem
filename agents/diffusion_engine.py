@@ -63,19 +63,28 @@ class PyTorchDiffusionEngine:
     Local Diffusion Engine using PyTorch and Metal Performance Shaders (MPS).
     """
 
-    def __init__(self, model_id: Optional[str] = None, use_mps: bool = True):
+    def __init__(
+        self,
+        model_id: Optional[str] = None,
+        use_mps: bool = True,
+        lora_path: Optional[str] = None,
+    ):
         """
         Initialize the Diffusion Engine.
 
         Args:
             model_id: HuggingFace model ID for diffusion (e.g., runwayml/stable-diffusion-v1-5, segmind/tiny-sd).
             use_mps: Whether to enable Apple Silicon MPS acceleration.
+            lora_path: Directory holding LoRA adapter weights to apply on load,
+                as produced by LoRALocalTrainer. Defaults to $DEFAULT_LORA_PATH.
         """
         self.model_id = model_id or os.environ.get("DEFAULT_SD_MODEL", "segmind/tiny-sd")
+        self.lora_path = lora_path or os.environ.get("DEFAULT_LORA_PATH") or None
         self.use_mps = use_mps and MPS_AVAILABLE
         self.device = "mps" if self.use_mps else ("cuda" if TORCH_AVAILABLE and torch.cuda.is_available() else "cpu")
         self.pipe = None
         self.initialized = False
+        self.active_lora: Optional[str] = None
         logger.info(f"PyTorchDiffusionEngine configured with device: {self.device}")
 
     def get_hardware_status(self) -> Dict[str, Any]:
@@ -87,11 +96,26 @@ class PyTorchDiffusionEngine:
             "active_device": self.device,
             "acceleration_label": "Apple Silicon Metal GPU (MPS)" if self.device == "mps" else self.device.upper(),
             "model_id": self.model_id,
+            "lora": self.active_lora,
             "initialized": self.initialized,
         }
 
-    def initialize_pipeline(self, target_model: Optional[str] = None) -> bool:
-        """Lazy initialization of diffusion model pipeline."""
+    def initialize_pipeline(
+        self, target_model: Optional[str] = None, target_lora: Optional[str] = None
+    ) -> bool:
+        """
+        Lazy initialization of the diffusion model pipeline.
+
+        Args:
+            target_model: Load this model instead of the configured one.
+            target_lora: Apply this LoRA adapter directory instead of the
+                configured one. Changing either forces a reload.
+        """
+        if target_lora is not None and target_lora != self.lora_path:
+            self.lora_path = target_lora
+            self.initialized = False
+            self.pipe = None
+
         if target_model and target_model != self.model_id:
             self.model_id = target_model
             self.initialized = False
@@ -126,6 +150,21 @@ class PyTorchDiffusionEngine:
                     else:
                         self.pipe.enable_vae_tiling()
                 except Exception: pass
+            self.active_lora = None
+            if self.lora_path:
+                if not os.path.isdir(self.lora_path):
+                    logger.warning("LoRA path %s does not exist; loading base model only.", self.lora_path)
+                elif not hasattr(self.pipe, "load_lora_weights"):
+                    logger.warning("Pipeline %s does not support LoRA weights.", self.model_id)
+                else:
+                    try:
+                        self.pipe.load_lora_weights(self.lora_path)
+                        self.active_lora = self.lora_path
+                        logger.info("Applied LoRA adapter from %s", self.lora_path)
+                    except Exception as lora_err:
+                        # A bad adapter must not silently masquerade as the base model.
+                        logger.error("Failed to apply LoRA adapter %s: %s", self.lora_path, lora_err)
+
             self.pipe.to(self.device)
             self.initialized = True
             return True
@@ -150,6 +189,7 @@ class PyTorchDiffusionEngine:
         raw_mode: bool = False,
         model_id: Optional[str] = None,
         quality_preset: bool = False,
+        lora_path: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Generate image using local diffusion, or a placeholder if no model loads.
@@ -167,6 +207,7 @@ class PyTorchDiffusionEngine:
             model_id: Optional model to load instead of the configured one.
             quality_preset: If True, append the photographic quality suffix to the
                 prompt. Ignored when raw_mode is set.
+            lora_path: Optional LoRA adapter directory to apply for this call.
         """
         if not prompt or not prompt.strip():
             return {"success": False, "error": "Prompt cannot be empty"}
@@ -191,7 +232,7 @@ class PyTorchDiffusionEngine:
             final_prompt = " ".join(words[:55])
 
         # Attempt hardware-accelerated generation if available
-        if self.initialize_pipeline(model_id):
+        if self.initialize_pipeline(model_id, lora_path):
             try:
                 if self.device == "mps" and hasattr(torch, "mps") and hasattr(torch.mps, "empty_cache"):
                     try: torch.mps.empty_cache()
@@ -234,6 +275,7 @@ class PyTorchDiffusionEngine:
                     "engine": "PyTorch MPS (Apple Silicon Metal GPU)",
                     "device": self.device,
                     "model_id": self.model_id,
+                    "lora": self.active_lora,
                     "prompt": prompt,
                     "final_prompt": final_prompt,
                     "prompt_truncated": truncated,

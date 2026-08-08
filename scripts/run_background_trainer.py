@@ -31,7 +31,7 @@ def main():
 
     # 3. Full Deep 20-Epoch Checkpoint Fine-Tuning
     print("\n[Phase 3/3] Running Deep 20-Epoch Checkpoint Optimization...")
-    res_full = trainer.run_full_model_training(training_dir="static/training_data", epochs=20)
+    res_full = trainer.run_full_model_training(training_dir="static/training_data", max_steps=800)
     print(f"🎉 Full Local Fine-Tuning Complete!")
     print(f"   - Epochs: {res_full.get('epochs_completed')}")
     print(f"   - Final Loss: {res_full.get('final_loss')}")

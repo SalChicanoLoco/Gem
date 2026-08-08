@@ -166,7 +166,8 @@ class VideoAgent:
                 filepath=filepath,
             )
 
-        # Fallback to Quetzal High-Res Animation Engine if PyTorch weights are loading or unavailable
+        # No SVD pipeline: fall back to procedurally drawn frames. These are not
+        # diffusion output and are labelled as such in the response.
         if not frames:
             frames = self._generate_quetzal_diffusion_frames(
                 prompt=enhanced_prompt,
@@ -200,7 +201,8 @@ class VideoAgent:
             "fps": fps,
             "duration_seconds": round(num_frames / fps, 2),
             "style": style,
-            "engine": "PyTorch MPS Video Diffusion (Apple Silicon)" if (frames and self.pytorch_video_engine.initialized) else "Quetzal High-Res Animation Engine",
+            "engine": "PyTorch MPS Video Diffusion (Apple Silicon)" if (frames and self.pytorch_video_engine.initialized) else "Procedural animation placeholder (no video diffusion model loaded)",
+            "placeholder": not (frames and self.pytorch_video_engine.initialized),
             "file_path": filepath,
             "video_url": web_path,
         }

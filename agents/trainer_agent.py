@@ -16,6 +16,8 @@ from PIL import Image, ImageDraw, ImageOps
 
 from .gemma_agent import GemmaAgent
 from .diffusion_engine import PyTorchDiffusionEngine
+from .image_metrics import compare as compare_images
+from .lora_trainer import LoRALocalTrainer, TrainingConfig
 from .video_agent import VideoAgent
 from .spine import get_spine
 
@@ -118,7 +120,12 @@ class SelfOptimizingVisualTrainer:
         target_score: float = 85.0,
     ) -> Dict[str, Any]:
         """
-        Iteratively retrain and fine-tune PyTorch MPS diffusion prompts & weights until synthetic output matches target fidelity.
+        Iteratively refine the prompt until the generated image scores at least
+        `target_score` against the reference.
+
+        Scores are measured by comparing each generated image to the reference
+        (SSIM plus colour histogram correlation); they are not estimated from the
+        iteration or step count.
         """
         start_time = time.time()
         metadata = self.extract_image_metadata(reference_path)
@@ -140,16 +147,26 @@ class SelfOptimizingVisualTrainer:
                 num_inference_steps=steps,
             )
 
-            # Visual Fidelity & Symbol Quality Scoring
-            sim_score = min(98.5, round(68.0 + (i * 11.5) + (steps * 0.2), 1))
-            
+            # Measure the generated image against the reference. If generation
+            # produced no file, the iteration scores 0 rather than an estimate.
+            generated_file = gen_res.get("filepath")
+            if generated_file and os.path.exists(generated_file):
+                measurement = compare_images(reference_path, generated_file)
+            else:
+                measurement = {"success": False, "error": "No image produced"}
+
+            sim_score = measurement.get("score", 0.0) if measurement.get("success") else 0.0
+
             rec = {
                 "iteration": i + 1,
                 "prompt": current_prompt,
                 "steps": steps,
-                "fidelity_score": sim_score,
-                "symbol_accuracy": f"{min(99, 75 + i*10)}%",
-                "generated_file": gen_res.get("filepath"),
+                "score": sim_score,
+                "ssim": measurement.get("ssim"),
+                "histogram_correlation": measurement.get("histogram_correlation"),
+                "metric": measurement.get("metric"),
+                "placeholder_image": gen_res.get("placeholder"),
+                "generated_file": generated_file,
                 "relative_url": gen_res.get("relative_url"),
             }
             iteration_records.append(rec)
@@ -179,83 +196,49 @@ class SelfOptimizingVisualTrainer:
     def run_full_model_training(
         self,
         training_dir: str = "static/training_data",
-        epochs: int = 5,
+        max_steps: int = 200,
         learning_rate: float = 1e-4,
     ) -> Dict[str, Any]:
         """
-        Execute full local fine-tuning & weight optimization loop over all training images.
-        Saves checkpoint weights to disk in checkpoints/ and static/training_data/.
+        Run a real LoRA fine-tune over the local training images.
+
+        Delegates to LoRALocalTrainer, which performs actual VAE encoding, noise
+        prediction and backpropagation, and writes safetensors adapter weights.
+        Every reported loss is measured. If training cannot run, this returns
+        success=False rather than a checkpoint that does not exist.
+
+        Args:
+            training_dir: Directory of training images, organised in per-subject
+                subdirectories or with .txt caption sidecars.
+            max_steps: Number of optimizer steps to run.
+            learning_rate: AdamW learning rate for the LoRA parameters.
         """
         start_time = time.time()
         os.makedirs(training_dir, exist_ok=True)
         checkpoint_dir = "checkpoints"
         os.makedirs(checkpoint_dir, exist_ok=True)
 
-        image_files = [
-            os.path.join(training_dir, f)
-            for f in os.listdir(training_dir)
-            if f.lower().endswith((".png", ".jpg", ".jpeg", ".webp"))
-        ]
+        trainer = LoRALocalTrainer(
+            config=TrainingConfig(learning_rate=learning_rate, max_steps=max_steps),
+            output_dir=checkpoint_dir,
+        )
+        result = trainer.train(training_dir=training_dir, max_steps=max_steps)
 
-        if not image_files:
-            # Auto-create sample neural training asset if empty
-            sample_path = os.path.join(training_dir, "sample_training_asset.png")
-            gen_res = self.diffusion.generate(
-                prompt="RAW photorealistic portrait training baseline, sharp focus, 35mm lens, 8k uhd",
-                width=512,
-                height=512,
-                num_inference_steps=15,
-                output_dir=training_dir,
-            )
-            if gen_res.get("filepath") and os.path.exists(gen_res["filepath"]):
-                sample_path = gen_res["filepath"]
-            image_files = [sample_path]
-
-        epoch_logs = []
-        current_loss = 0.45
-
-        for ep in range(1, epochs + 1):
-            time.sleep(0.1)  # Simulate batch step optimization
-            current_loss = round(max(0.02, current_loss * 0.72), 4)
-            fidelity = round(min(99.4, 72.0 + (ep * 5.4)), 2)
-            
-            log_item = {
-                "epoch": ep,
-                "loss": current_loss,
-                "fidelity": f"{fidelity}%",
-                "images_processed": len(image_files),
-                "learning_rate": learning_rate,
+        if not result.get("success"):
+            # No weights were produced, so say so rather than reporting a checkpoint.
+            return {
+                "success": False,
+                "trained": False,
+                "error": result.get("error"),
+                "elapsed_seconds": round(time.time() - start_time, 2),
             }
-            epoch_logs.append(log_item)
 
-        # Save checkpoint metadata file to disk
-        ckpt_id = f"lora_ckpt_{int(time.time())}.json"
-        ckpt_path = os.path.join(checkpoint_dir, ckpt_id)
-        ckpt_payload = {
-            "checkpoint_id": ckpt_id,
-            "timestamp": time.time(),
-            "epochs_completed": epochs,
-            "final_loss": current_loss,
-            "training_images_count": len(image_files),
-            "status": "FINE_TUNED_SUCCESS",
-            "device": "Apple Silicon Metal GPU (MPS)",
-        }
-        
-        import json
-        with open(ckpt_path, "w") as f:
-            json.dump(ckpt_payload, f, indent=2)
-
-        return {
-            "success": True,
-            "checkpoint_file": ckpt_path,
-            "checkpoint_id": ckpt_id,
-            "epochs_completed": epochs,
-            "final_loss": current_loss,
-            "total_images_processed": len(image_files),
-            "elapsed_seconds": round(time.time() - start_time, 2),
-            "epoch_history": epoch_logs,
-            "message": f"Model successfully fine-tuned over {len(image_files)} training assets. Weights saved to {ckpt_path}.",
-        }
+        result["message"] = (
+            f"LoRA adapter trained for {result['steps_completed']} steps over "
+            f"{result['images_used']} images. Loss went from {result['first_loss']} to "
+            f"{result['final_loss']}. Weights: {result['weights_dir']}"
+        )
+        return result
 
     def fetch_and_train_subject(self, subject_name: str = "roadrunner") -> Dict[str, Any]:
         """
@@ -294,7 +277,7 @@ class SelfOptimizingVisualTrainer:
         # Run full model weight fine-tuning
         fine_tune_summary = self.run_full_model_training(
             training_dir=subject_dir,
-            epochs=5,
+            max_steps=200,
         )
 
         return {
