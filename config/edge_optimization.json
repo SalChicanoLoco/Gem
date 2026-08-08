@@ -1,0 +1,11 @@
+{
+  "last_optimized_timestamp": 1786224375.870998,
+  "optimal_steps": 10,
+  "optimal_iterations_per_second": 2.87,
+  "quality_score": 85.0,
+  "device": "mps",
+  "enable_attention_slicing": true,
+  "enable_vae_tiling": true,
+  "status": "OPTIMIZED_FOR_EDGE_HARDWARE",
+  "profiles_tested": 1
+}

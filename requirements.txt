@@ -7,6 +7,18 @@ Werkzeug>=3.0.0
 numpy>=1.26.0
 scikit-learn>=1.4.0
 pandas>=2.1.0
+pillow>=10.0.0
+
+# Local diffusion stack (PyTorch MPS on Apple Silicon)
+torch>=2.1.0
+torchvision>=0.16.0
+diffusers>=0.27.0
+transformers>=4.40.0
+accelerate>=0.30.0
+safetensors>=0.4.0
+
+# Process/port inspection for the CleanHouse pre-flight sweep
+psutil>=5.9.0
 
 # HTTP client for external API calls
 requests>=2.31.0

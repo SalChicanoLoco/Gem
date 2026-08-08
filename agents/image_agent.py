@@ -5,14 +5,14 @@ ImageAgent - Image generation agent for creating visualizations and AI-generated
 import hashlib
 import os
 from typing import Any
-
 import requests
+from .diffusion_engine import PyTorchDiffusionEngine
 
 
 class ImageAgent:
     """
     Agent responsible for image generation tasks.
-    Designed to integrate with external image generation APIs (e.g., DALL-E, Stable Diffusion).
+    Integrates external image APIs and local PyTorch MPS hardware-accelerated diffusion.
     """
 
     def __init__(self, api_key: str | None = None, api_endpoint: str | None = None):
@@ -27,6 +27,7 @@ class ImageAgent:
         self.api_endpoint = api_endpoint or os.environ.get(
             "IMAGE_API_ENDPOINT", "https://api.example.com/v1/images"
         )
+        self.diffusion_engine = PyTorchDiffusionEngine()
 
     def generate_image(
         self,
@@ -57,12 +58,18 @@ class ImageAgent:
                 "error": "Dimensions must be between 64 and 2048 pixels",
             }
 
+        # Check if local PyTorch diffusion is requested
+        if style in ["local_mps", "diffusion", "pytorch"] or os.environ.get("USE_LOCAL_DIFFUSION") == "true":
+            return self.diffusion_engine.generate(prompt, width, height)
+
         # If API key is configured, attempt real generation
         if self.api_key:
             return self._call_external_api(prompt, width, height, style)
 
-        # Otherwise, return a mock response for development/testing
-        return self._generate_mock_response(prompt, width, height, style)
+        # Fall back to local PyTorch diffusion / procedural synthesis engine
+        res = self.diffusion_engine.generate(prompt, width, height)
+        res["style"] = style
+        return res
 
     def _call_external_api(
         self,

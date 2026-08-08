@@ -3,23 +3,26 @@ ModelAgent - ML analytics agent for water quality predictions and data analysis.
 """
 
 from typing import Any
+from .gemma_agent import GemmaAgent
 
 
 class ModelAgent:
     """
     Agent responsible for ML analytics tasks, specifically water quality analysis.
-    Designed to be extensible for integration with scikit-learn, TensorFlow, or external APIs.
+    Integrated with local Gemma LLM for deep reasoning and predictive analytics.
     """
 
-    def __init__(self, model_path: str | None = None):
+    def __init__(self, model_path: str | None = None, gemma_agent: GemmaAgent | None = None):
         """
         Initialize the ModelAgent.
 
         Args:
             model_path: Optional path to a pre-trained model file.
+            gemma_agent: Optional GemmaAgent instance for LLM reasoning.
         """
         self.model_path = model_path
         self.model = None
+        self.gemma = gemma_agent or GemmaAgent()
 
     def load_model(self) -> bool:
         """
@@ -29,22 +32,20 @@ class ModelAgent:
             True if model loaded successfully, False otherwise.
         """
         if self.model_path:
-            # Placeholder for actual model loading logic
-            # In production: self.model = joblib.load(self.model_path)
             self.model = {"status": "loaded", "path": self.model_path}
             return True
         return False
 
     def predict_water_quality(self, data: dict[str, Any]) -> dict[str, Any]:
         """
-        Predict water quality based on input parameters.
+        Predict water quality based on input parameters and Gemma LLM analysis.
 
         Args:
             data: Dictionary containing water quality parameters
                   (e.g., pH, turbidity, temperature, dissolved_oxygen).
 
         Returns:
-            Dictionary with prediction results and quality score.
+            Dictionary with prediction results, quality score, and Gemma reasoning.
         """
         # Extract parameters with defaults
         ph = data.get("ph", 7.0)
@@ -52,11 +53,19 @@ class ModelAgent:
         temperature = data.get("temperature", 20.0)
         dissolved_oxygen = data.get("dissolved_oxygen", 8.0)
 
-        # Simple rule-based scoring (placeholder for ML model)
-        # In production, this would use the loaded model
+        # Rule-based scoring engine
         score = self._calculate_quality_score(ph, turbidity, temperature, dissolved_oxygen)
-
         quality_label = self._get_quality_label(score)
+
+        # Enhance with Gemma local LLM analysis
+        gemma_insight = self.gemma.analyze_telemetry({
+            "ph": ph,
+            "turbidity": turbidity,
+            "temperature": temperature,
+            "dissolved_oxygen": dissolved_oxygen,
+            "score": score,
+            "label": quality_label,
+        })
 
         return {
             "quality_score": round(score, 2),
@@ -68,6 +77,7 @@ class ModelAgent:
                 "dissolved_oxygen": dissolved_oxygen,
             },
             "recommendations": self._get_recommendations(score, ph, turbidity),
+            "gemma_reasoning": gemma_insight,
         }
 
     def _calculate_quality_score(

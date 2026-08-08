@@ -62,3 +62,16 @@ Thumbs.db
 tmp/
 temp/
 *.tmp
+
+# Generated media and training artifacts
+static/videos/
+static/training_data/
+checkpoints/
+
+# Runtime audit trail written by the BoundaryGuard
+config/runtime_action_log.jsonl
+config/rollback_manifest.json
+
+# Tools written at runtime by the evolution engine
+extensions/*.py
+!extensions/__init__.py

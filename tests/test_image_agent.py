@@ -3,13 +3,15 @@ Tests for the ImageAgent class.
 """
 
 import pytest
+from unittest.mock import patch, MagicMock
 from agents.image_agent import ImageAgent
 
 
 @pytest.fixture
 def agent():
     """Create an ImageAgent instance for testing."""
-    return ImageAgent()
+    ag = ImageAgent()
+    return ag
 
 
 class TestImageAgentInit:
@@ -35,11 +37,18 @@ class TestImageGeneration:
     """Tests for image generation."""
 
     def test_generate_with_valid_prompt(self, agent):
-        """Test generation with valid prompt returns mock response."""
-        result = agent.generate_image("A beautiful sunset")
-        assert result["success"] is True
-        assert result["mock"] is True
-        assert "image_id" in result
+        """Test generation with valid prompt returns response."""
+        with patch.object(agent.diffusion_engine, "generate") as mock_gen:
+            mock_gen.return_value = {
+                "success": True,
+                "engine": "PyTorch MPS (Apple Silicon Metal GPU)",
+                "dimensions": {"width": 512, "height": 512},
+                "filepath": "static/videos/test.png",
+                "relative_url": "/static/videos/test.png",
+                "base64": "mock_b64",
+            }
+            result = agent.generate_image("A beautiful sunset")
+            assert result["success"] is True
 
     def test_generate_with_empty_prompt(self, agent):
         """Test generation with empty prompt returns error."""
@@ -49,10 +58,19 @@ class TestImageGeneration:
 
     def test_generate_with_dimensions(self, agent):
         """Test generation with custom dimensions."""
-        result = agent.generate_image("Test image", width=1024, height=768)
-        assert result["success"] is True
-        assert result["dimensions"]["width"] == 1024
-        assert result["dimensions"]["height"] == 768
+        with patch.object(agent.diffusion_engine, "generate") as mock_gen:
+            mock_gen.return_value = {
+                "success": True,
+                "engine": "PyTorch MPS (Apple Silicon Metal GPU)",
+                "dimensions": {"width": 1024, "height": 768},
+                "filepath": "static/videos/test.png",
+                "relative_url": "/static/videos/test.png",
+                "base64": "mock_b64",
+            }
+            result = agent.generate_image("Test image", width=1024, height=768)
+            assert result["success"] is True
+            assert result["dimensions"]["width"] == 1024
+            assert result["dimensions"]["height"] == 768
 
     def test_generate_with_invalid_dimensions(self, agent):
         """Test generation with invalid dimensions returns error."""
@@ -62,9 +80,19 @@ class TestImageGeneration:
 
     def test_generate_with_style(self, agent):
         """Test generation with style parameter."""
-        result = agent.generate_image("Test image", style="watercolor")
-        assert result["success"] is True
-        assert result["style"] == "watercolor"
+        with patch.object(agent.diffusion_engine, "generate") as mock_gen:
+            mock_gen.return_value = {
+                "success": True,
+                "engine": "PyTorch MPS (Apple Silicon Metal GPU)",
+                "style": "watercolor",
+                "dimensions": {"width": 512, "height": 512},
+                "filepath": "static/videos/test.png",
+                "relative_url": "/static/videos/test.png",
+                "base64": "mock_b64",
+            }
+            result = agent.generate_image("Test image", style="watercolor")
+            assert result["success"] is True
+            assert result["style"] == "watercolor"
 
 
 class TestPromptValidation:
