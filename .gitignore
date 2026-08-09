@@ -37,6 +37,10 @@ env/
 *.swo
 *~
 
+# Claude Code: the launch config is shared, the permission allowlist is personal
+# to one machine and is not.
+.claude/settings.local.json
+
 # Testing
 .pytest_cache/
 .coverage
