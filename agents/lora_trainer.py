@@ -54,7 +54,10 @@ class TrainingConfig:
     """Hyperparameters for a LoRA run."""
 
     model_id: str = "runwayml/stable-diffusion-v1-5"
-    resolution: int = 512
+    # SD 1.5 works at non-square sizes as long as both edges are multiples of 8.
+    # 512x768 suits portrait/vertical source material.
+    width: int = 512
+    height: int = 512
     rank: int = 4
     learning_rate: float = 1e-4
     max_steps: int = 200
@@ -112,12 +115,13 @@ def discover_training_pairs(training_dir: str) -> List[Tuple[str, str]]:
 if TORCH_AVAILABLE:
 
     class _CaptionedImageDataset(Dataset):
-        """Images resized to a square resolution, normalised to [-1, 1], with token ids."""
+        """Images resized to width x height, normalised to [-1, 1], with token ids."""
 
-        def __init__(self, pairs: List[Tuple[str, str]], tokenizer, resolution: int):
+        def __init__(self, pairs: List[Tuple[str, str]], tokenizer, width: int, height: int):
             self.pairs = pairs
             self.tokenizer = tokenizer
-            self.resolution = resolution
+            self.width = width
+            self.height = height
 
         def __len__(self) -> int:
             return len(self.pairs)
@@ -125,7 +129,7 @@ if TORCH_AVAILABLE:
         def __getitem__(self, index: int) -> Dict[str, Any]:
             image_path, caption = self.pairs[index]
             image = Image.open(image_path).convert("RGB").resize(
-                (self.resolution, self.resolution), Image.BICUBIC
+                (self.width, self.height), Image.BICUBIC
             )
 
             pixels = torch.from_numpy(_to_float_array(image))
@@ -248,7 +252,7 @@ class LoRALocalTrainer:
         unet.to(device)
 
         optimizer = torch.optim.AdamW(trainable, lr=cfg.learning_rate)
-        dataset = _CaptionedImageDataset(pairs, tokenizer, cfg.resolution)
+        dataset = _CaptionedImageDataset(pairs, tokenizer, cfg.width, cfg.height)
         loader = DataLoader(dataset, batch_size=cfg.batch_size, shuffle=True)
         generator = torch.Generator(device="cpu").manual_seed(cfg.seed)
 
@@ -320,7 +324,7 @@ class LoRALocalTrainer:
             "images_used": len(pairs),
             "rank": cfg.rank,
             "learning_rate": cfg.learning_rate,
-            "resolution": cfg.resolution,
+            "resolution": f"{cfg.width}x{cfg.height}",
             "first_loss": losses[0],
             "final_loss": losses[-1],
             "mean_loss": round(sum(losses) / len(losses), 6),

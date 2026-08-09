@@ -1,8 +1,8 @@
 {
-  "last_optimized_timestamp": 1786226462.73496,
+  "last_optimized_timestamp": 1786233973.5550148,
   "optimal_steps": 10,
-  "optimal_iterations_per_second": 2.87,
-  "measured_seconds_per_image": 3.479,
+  "optimal_iterations_per_second": 2.89,
+  "measured_seconds_per_image": 3.461,
   "device": "mps",
   "enable_attention_slicing": true,
   "enable_vae_tiling": true,
