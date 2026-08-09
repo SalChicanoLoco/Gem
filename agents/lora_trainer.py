@@ -14,6 +14,7 @@ the containing directory name (``training_data/roadrunner_desert`` -> "roadrunne
 desert"), which matches how the training assets in this repo are organised.
 """
 
+import json
 import logging
 import os
 import time
@@ -21,6 +22,11 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
+
+# Sidecar written next to the safetensors, recording which base model the adapter
+# was trained against. A LoRA is only loadable into the UNet geometry it was
+# trained on, and the weights file alone does not say which that was.
+ADAPTER_META_FILENAME = "adapter_meta.json"
 
 TORCH_AVAILABLE = False
 TRAINING_DEPS_AVAILABLE = False
@@ -65,6 +71,33 @@ class TrainingConfig:
     seed: int = 0
     # Attention projections are the standard LoRA injection points for SD UNets.
     target_modules: Tuple[str, ...] = ("to_q", "to_k", "to_v", "to_out.0")
+
+
+def write_adapter_meta(weight_dir: str, meta: Dict[str, Any]) -> str:
+    """Write the adapter sidecar describing what this LoRA was trained against."""
+    path = os.path.join(weight_dir, ADAPTER_META_FILENAME)
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(meta, handle, indent=2, sort_keys=True)
+    return path
+
+
+def read_adapter_meta(weight_dir: str) -> Optional[Dict[str, Any]]:
+    """
+    Read an adapter's sidecar, or None when it has none.
+
+    Adapters trained before the sidecar existed return None, which callers must
+    treat as "base model unknown" rather than as a mismatch.
+    """
+    path = os.path.join(weight_dir, ADAPTER_META_FILENAME)
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path, encoding="utf-8") as handle:
+            meta = json.load(handle)
+        return meta if isinstance(meta, dict) else None
+    except (OSError, ValueError) as e:
+        logger.warning("Could not read %s: %s", path, e)
+        return None
 
 
 def discover_training_pairs(training_dir: str) -> List[Tuple[str, str]]:
@@ -310,6 +343,18 @@ class LoRALocalTrainer:
         lora_state = get_peft_model_state_dict(unet)
         StableDiffusionPipeline.save_lora_weights(
             save_directory=weight_dir, unet_lora_layers=lora_state, safe_serialization=True
+        )
+        write_adapter_meta(
+            weight_dir,
+            {
+                "base_model_id": cfg.model_id,
+                "rank": cfg.rank,
+                "target_modules": list(cfg.target_modules),
+                "resolution": f"{cfg.width}x{cfg.height}",
+                "steps_completed": step,
+                "images_used": len(pairs),
+                "trained_at": int(time.time()),
+            },
         )
 
         losses = [entry["loss"] for entry in step_logs]

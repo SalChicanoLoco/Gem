@@ -3,9 +3,11 @@ Tests for PyTorchDiffusionEngine and hardware acceleration checks.
 """
 
 import os
+import tempfile
 import unittest
 from unittest.mock import patch, MagicMock
 from agents.diffusion_engine import PyTorchDiffusionEngine
+from agents.lora_trainer import read_adapter_meta, write_adapter_meta
 from agents import ImageAgent
 
 
@@ -55,6 +57,57 @@ class TestPyTorchDiffusionEngine(unittest.TestCase):
             }
             result = agent.generate_image("A futuristic city", width=256, height=256, style="local_mps")
             self.assertTrue(result.get("success"))
+
+
+class TestAdapterBaseModelResolution(unittest.TestCase):
+    """
+    A LoRA only fits the UNet it was trained on. The engine must pair the two
+    without the caller having to know, and must refuse rather than quietly render
+    as the base model when it cannot.
+    """
+
+    def setUp(self):
+        self.engine = PyTorchDiffusionEngine(model_id="segmind/tiny-sd")
+        self.tmp = tempfile.TemporaryDirectory()
+        self.adapter = self.tmp.name
+        self.addCleanup(self.tmp.cleanup)
+
+    def test_sidecar_roundtrips(self):
+        write_adapter_meta(self.adapter, {"base_model_id": "runwayml/stable-diffusion-v1-5", "rank": 8})
+        self.assertEqual(read_adapter_meta(self.adapter)["base_model_id"], "runwayml/stable-diffusion-v1-5")
+
+    def test_missing_sidecar_reads_as_none(self):
+        self.assertIsNone(read_adapter_meta(self.adapter))
+
+    def test_declared_base_is_loaded_when_caller_names_no_model(self):
+        write_adapter_meta(self.adapter, {"base_model_id": "runwayml/stable-diffusion-v1-5"})
+        self.engine.lora_path = self.adapter
+
+        self.assertEqual(self.engine._resolve_base_model(None), "runwayml/stable-diffusion-v1-5")
+        self.assertIsNone(self.engine.lora_error)
+
+    def test_explicit_model_wins_and_adapter_is_refused(self):
+        """An explicit model_id is the caller's choice; the adapter yields, loudly."""
+        write_adapter_meta(self.adapter, {"base_model_id": "runwayml/stable-diffusion-v1-5"})
+        self.engine.lora_path = self.adapter
+
+        self.assertEqual(self.engine._resolve_base_model("segmind/tiny-sd"), "segmind/tiny-sd")
+        self.assertIsNotNone(self.engine.lora_error)
+        self.assertIn("runwayml/stable-diffusion-v1-5", self.engine.lora_error)
+
+    def test_matching_base_needs_no_switch(self):
+        write_adapter_meta(self.adapter, {"base_model_id": "segmind/tiny-sd"})
+        self.engine.lora_path = self.adapter
+
+        self.assertIsNone(self.engine._resolve_base_model(None))
+        self.assertIsNone(self.engine.lora_error)
+
+    def test_adapter_without_sidecar_is_left_alone(self):
+        """Unknown base is not a mismatch; the load is still attempted."""
+        self.engine.lora_path = self.adapter
+
+        self.assertIsNone(self.engine._resolve_base_model(None))
+        self.assertIsNone(self.engine.lora_error)
 
 
 if __name__ == "__main__":

@@ -16,6 +16,8 @@ import os
 import time
 from typing import Any, Dict, Optional
 
+from .lora_trainer import ADAPTER_META_FILENAME, read_adapter_meta
+
 logger = logging.getLogger(__name__)
 
 # Upper bound on denoising steps, capped to keep MPS runs inside a responsive
@@ -85,7 +87,41 @@ class PyTorchDiffusionEngine:
         self.pipe = None
         self.initialized = False
         self.active_lora: Optional[str] = None
+        self.lora_error: Optional[str] = None
         logger.info(f"PyTorchDiffusionEngine configured with device: {self.device}")
+
+    def _resolve_base_model(self, target_model: Optional[str]) -> Optional[str]:
+        """
+        Decide which base model to load, given the adapter the caller asked for.
+
+        A LoRA only fits the UNet geometry it was trained on, so an SD 1.5 adapter
+        cannot load into tiny-sd. When the adapter declares its base and the caller
+        did not name a model, load the base the adapter needs. When the caller did
+        name a conflicting model, honour that and refuse the adapter rather than
+        overriding an explicit choice.
+
+        Returns the model to switch to, or None to leave the current one alone.
+        """
+        self.lora_error = None
+        if not self.lora_path or not os.path.isdir(self.lora_path):
+            return target_model
+
+        meta = read_adapter_meta(self.lora_path)
+        base = (meta or {}).get("base_model_id")
+        requested = target_model or self.model_id
+        if not base or base == requested:
+            return target_model
+
+        if target_model:
+            self.lora_error = (
+                f"adapter {self.lora_path} was trained on {base}, which does not match the "
+                f"requested model {target_model}; pass model_id={base!r} to use this adapter"
+            )
+            return target_model
+
+        logger.info("Adapter %s declares base model %s; loading that instead of %s.",
+                    self.lora_path, base, self.model_id)
+        return base
 
     def get_hardware_status(self) -> Dict[str, Any]:
         """Get details about PyTorch hardware acceleration on this Mac."""
@@ -97,6 +133,7 @@ class PyTorchDiffusionEngine:
             "acceleration_label": "Apple Silicon Metal GPU (MPS)" if self.device == "mps" else self.device.upper(),
             "model_id": self.model_id,
             "lora": self.active_lora,
+            "lora_error": self.lora_error,
             "initialized": self.initialized,
         }
 
@@ -116,8 +153,9 @@ class PyTorchDiffusionEngine:
             self.initialized = False
             self.pipe = None
 
-        if target_model and target_model != self.model_id:
-            self.model_id = target_model
+        resolved_model = self._resolve_base_model(target_model)
+        if resolved_model and resolved_model != self.model_id:
+            self.model_id = resolved_model
             self.initialized = False
             self.pipe = None
 
@@ -152,9 +190,14 @@ class PyTorchDiffusionEngine:
                 except Exception: pass
             self.active_lora = None
             if self.lora_path:
-                if not os.path.isdir(self.lora_path):
-                    logger.warning("LoRA path %s does not exist; loading base model only.", self.lora_path)
+                if self.lora_error:
+                    # Declared mismatch, already explained by _resolve_base_model.
+                    logger.error("Not applying LoRA adapter: %s", self.lora_error)
+                elif not os.path.isdir(self.lora_path):
+                    self.lora_error = f"LoRA path {self.lora_path} does not exist"
+                    logger.warning("%s; loading base model only.", self.lora_error)
                 elif not hasattr(self.pipe, "load_lora_weights"):
+                    self.lora_error = f"pipeline {self.model_id} does not support LoRA weights"
                     logger.warning("Pipeline %s does not support LoRA weights.", self.model_id)
                 else:
                     try:
@@ -163,7 +206,17 @@ class PyTorchDiffusionEngine:
                         logger.info("Applied LoRA adapter from %s", self.lora_path)
                     except Exception as lora_err:
                         # A bad adapter must not silently masquerade as the base model.
-                        logger.error("Failed to apply LoRA adapter %s: %s", self.lora_path, lora_err)
+                        # Shape mismatches list every tensor; report the cause, not the list.
+                        if "size mismatch" in str(lora_err):
+                            self.lora_error = (
+                                f"adapter {self.lora_path} does not fit the UNet of {self.model_id} "
+                                f"(tensor shape mismatch). It was trained on a different base model, "
+                                f"and no {ADAPTER_META_FILENAME} records which one."
+                            )
+                            logger.error("Failed to apply LoRA adapter: %s", self.lora_error)
+                        else:
+                            self.lora_error = str(lora_err)
+                            logger.error("Failed to apply LoRA adapter %s: %s", self.lora_path, lora_err)
 
             self.pipe.to(self.device)
             self.initialized = True
@@ -276,6 +329,7 @@ class PyTorchDiffusionEngine:
                     "device": self.device,
                     "model_id": self.model_id,
                     "lora": self.active_lora,
+                    "lora_error": self.lora_error,
                     "prompt": prompt,
                     "final_prompt": final_prompt,
                     "prompt_truncated": truncated,

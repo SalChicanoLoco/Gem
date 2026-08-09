@@ -111,6 +111,28 @@
             box-shadow: 0 0 8px var(--success);
             animation: pulse 1.5s infinite;
         }
+        /* Applied when a backing service is unreachable, so the badge cannot
+           report green for something that is not actually running. */
+        .hardware-badge.degraded {
+            background: rgba(245, 158, 11, 0.1);
+            border-color: rgba(245, 158, 11, 0.35);
+            color: #f59e0b;
+        }
+        .hardware-badge.degraded .hardware-dot {
+            background: #f59e0b;
+            box-shadow: 0 0 8px #f59e0b;
+            animation: none;
+        }
+        .hardware-badge.unknown {
+            background: rgba(148, 163, 184, 0.1);
+            border-color: rgba(148, 163, 184, 0.3);
+            color: #94a3b8;
+        }
+        .hardware-badge.unknown .hardware-dot {
+            background: #94a3b8;
+            box-shadow: none;
+            animation: none;
+        }
         
         /* Nav Tabs */
         .nav-tabs {
@@ -560,9 +582,9 @@
                     <button class="btn-icon" style="background:rgba(99,102,241,0.2); border:1px solid rgba(99,102,241,0.4); color:#38bdf8; border-radius:1rem; padding:0.25rem 0.6rem; font-size:0.75rem; cursor:pointer;" onclick="speakText('Sena Vocal Engine active. Voice talk-back is working cleanly.')">🔊 Test Voice</button>
                     <select id="voiceSelect" class="tts-select" onchange="setVoice(this.value)" title="Select Text-to-Speech voice"></select>
                 </div>
-                <div class="hardware-badge">
+                <div class="hardware-badge unknown" id="hardwareBadge">
                     <div class="hardware-dot"></div>
-                    <span id="hardwareStatusText">Apple Silicon Metal GPU (MPS) • Gemma 2 Online</span>
+                    <span id="hardwareStatusText">Checking status…</span>
                 </div>
             </div>
         </header>
@@ -1018,6 +1040,34 @@
                 }
             } catch (error) {
                 console.error('Failed to fetch dashboard:', error);
+            }
+        }
+
+        // The badge reports what the backend actually reports. Gemma runs behind
+        // Ollama, which is often not running; saying "Online" regardless would be
+        // the dashboard asserting something it never checked.
+        async function fetchHardwareStatus() {
+            const badge = document.getElementById('hardwareBadge');
+            const text = document.getElementById('hardwareStatusText');
+            try {
+                const response = await fetch(`${API_BASE}/`);
+                const data = await response.json();
+                const gemma = data.gemma_status || {};
+                const accel = gemma.hardware_acceleration || 'CPU';
+                const online = gemma.available === true;
+                const gemmaLabel = online
+                    ? `${gemma.model || 'Gemma'} online`
+                    : `${gemma.model || 'Gemma'} offline (${gemma.status || 'unavailable'})`;
+
+                text.textContent = `${accel} • ${gemmaLabel}`;
+                badge.classList.remove('unknown');
+                badge.classList.toggle('degraded', !online);
+                badge.title = online ? '' : `Ollama unreachable at ${gemma.ollama_host || 'unknown host'}`;
+            } catch (error) {
+                console.error('Failed to fetch hardware status:', error);
+                text.textContent = 'API unreachable';
+                badge.classList.remove('degraded');
+                badge.classList.add('unknown');
             }
         }
 
@@ -1677,7 +1727,9 @@
 
         // Init
         fetchDashboard();
+        fetchHardwareStatus();
         setInterval(fetchDashboard, 5000);
+        setInterval(fetchHardwareStatus, 15000);
         initVocalEngine();
     </script>
 
