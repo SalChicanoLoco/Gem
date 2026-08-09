@@ -1,0 +1,114 @@
+"""
+Tests for PyTorchDiffusionEngine and hardware acceleration checks.
+"""
+
+import os
+import tempfile
+import unittest
+from unittest.mock import patch, MagicMock
+from agents.diffusion_engine import PyTorchDiffusionEngine
+from agents.lora_trainer import read_adapter_meta, write_adapter_meta
+from agents import ImageAgent
+
+
+class TestPyTorchDiffusionEngine(unittest.TestCase):
+    def setUp(self):
+        self.engine = PyTorchDiffusionEngine()
+
+    def test_hardware_status(self):
+        status = self.engine.get_hardware_status()
+        self.assertIn("torch_available", status)
+        self.assertIn("mps_available", status)
+        self.assertIn("active_device", status)
+
+    def test_generation_returns_image(self):
+        result = self.engine.generate("A serene mountain landscape", width=256, height=256, num_inference_steps=1)
+        self.assertTrue(result.get("success"))
+        self.assertIn("dimensions", result)
+        self.assertEqual(result["dimensions"]["width"], 256)
+        self.assertIn("base64", result)
+        self.assertIn("placeholder", result)
+
+    def test_placeholder_is_flagged_and_not_called_a_render(self):
+        """A gradient placeholder must never present itself as a diffusion render."""
+        with patch.object(self.engine, "initialize_pipeline", return_value=False):
+            result = self.engine.generate("anything", width=64, height=64)
+
+        self.assertTrue(result["placeholder"])
+        self.assertIn("placeholder", result["engine"].lower())
+        self.assertNotIn("photorealistic", result["engine"].lower())
+
+    def test_steps_are_clamped_and_reported(self):
+        result = self.engine.generate("a cube", width=64, height=64, num_inference_steps=500)
+        if not result.get("placeholder"):
+            self.assertEqual(result["steps_requested"], 500)
+            self.assertLessEqual(result["steps_used"], 19)
+
+    def test_image_agent_integration(self):
+        agent = ImageAgent()
+        with patch.object(agent.diffusion_engine, "generate") as mock_gen:
+            mock_gen.return_value = {
+                "success": True,
+                "engine": "PyTorch MPS (Apple Silicon Metal GPU)",
+                "dimensions": {"width": 256, "height": 256},
+                "filepath": "static/videos/test.png",
+                "relative_url": "/static/videos/test.png",
+                "base64": "mock_b64",
+            }
+            result = agent.generate_image("A futuristic city", width=256, height=256, style="local_mps")
+            self.assertTrue(result.get("success"))
+
+
+class TestAdapterBaseModelResolution(unittest.TestCase):
+    """
+    A LoRA only fits the UNet it was trained on. The engine must pair the two
+    without the caller having to know, and must refuse rather than quietly render
+    as the base model when it cannot.
+    """
+
+    def setUp(self):
+        self.engine = PyTorchDiffusionEngine(model_id="segmind/tiny-sd")
+        self.tmp = tempfile.TemporaryDirectory()
+        self.adapter = self.tmp.name
+        self.addCleanup(self.tmp.cleanup)
+
+    def test_sidecar_roundtrips(self):
+        write_adapter_meta(self.adapter, {"base_model_id": "runwayml/stable-diffusion-v1-5", "rank": 8})
+        self.assertEqual(read_adapter_meta(self.adapter)["base_model_id"], "runwayml/stable-diffusion-v1-5")
+
+    def test_missing_sidecar_reads_as_none(self):
+        self.assertIsNone(read_adapter_meta(self.adapter))
+
+    def test_declared_base_is_loaded_when_caller_names_no_model(self):
+        write_adapter_meta(self.adapter, {"base_model_id": "runwayml/stable-diffusion-v1-5"})
+        self.engine.lora_path = self.adapter
+
+        self.assertEqual(self.engine._resolve_base_model(None), "runwayml/stable-diffusion-v1-5")
+        self.assertIsNone(self.engine.lora_error)
+
+    def test_explicit_model_wins_and_adapter_is_refused(self):
+        """An explicit model_id is the caller's choice; the adapter yields, loudly."""
+        write_adapter_meta(self.adapter, {"base_model_id": "runwayml/stable-diffusion-v1-5"})
+        self.engine.lora_path = self.adapter
+
+        self.assertEqual(self.engine._resolve_base_model("segmind/tiny-sd"), "segmind/tiny-sd")
+        self.assertIsNotNone(self.engine.lora_error)
+        self.assertIn("runwayml/stable-diffusion-v1-5", self.engine.lora_error)
+
+    def test_matching_base_needs_no_switch(self):
+        write_adapter_meta(self.adapter, {"base_model_id": "segmind/tiny-sd"})
+        self.engine.lora_path = self.adapter
+
+        self.assertIsNone(self.engine._resolve_base_model(None))
+        self.assertIsNone(self.engine.lora_error)
+
+    def test_adapter_without_sidecar_is_left_alone(self):
+        """Unknown base is not a mismatch; the load is still attempted."""
+        self.engine.lora_path = self.adapter
+
+        self.assertIsNone(self.engine._resolve_base_model(None))
+        self.assertIsNone(self.engine.lora_error)
+
+
+if __name__ == "__main__":
+    unittest.main()

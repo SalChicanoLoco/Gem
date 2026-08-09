@@ -62,3 +62,19 @@ Thumbs.db
 tmp/
 temp/
 *.tmp
+
+# Generated media and training artifacts
+static/videos/
+static/training_data/
+checkpoints/
+# Source material for training runs. Kept locally; too large for git, and the
+# licence on a given clip is not necessarily ours to redistribute.
+My Training data/
+
+# Runtime audit trail written by the BoundaryGuard
+config/runtime_action_log.jsonl
+config/rollback_manifest.json
+
+# Tools written at runtime by the evolution engine
+extensions/*.py
+!extensions/__init__.py

@@ -8,18 +8,22 @@ import uuid
 from typing import Any
 
 
+from .gemma_agent import GemmaAgent
+
+
 class ArtAgent:
     """
     Agent responsible for aesthetic analysis, computer vision tasks, and
     generating scalable sets of images that can work with other agents for context.
     
-    Designed to integrate with computer vision APIs and aesthetic evaluation models.
+    Integrated with local Gemma LLM for multi-modal aesthetic prompt synthesis.
     """
 
     def __init__(
         self,
         api_key: str | None = None,
         vision_endpoint: str | None = None,
+        gemma_agent: GemmaAgent | None = None,
     ):
         """
         Initialize the ArtAgent.
@@ -27,11 +31,13 @@ class ArtAgent:
         Args:
             api_key: API key for external vision/aesthetic services.
             vision_endpoint: Base URL for vision API.
+            gemma_agent: Optional GemmaAgent for LLM aesthetic prompt synthesis.
         """
         self.api_key = api_key or os.environ.get("VISION_API_KEY")
         self.vision_endpoint = vision_endpoint or os.environ.get(
             "VISION_API_ENDPOINT", "https://api.example.com/v1/vision"
         )
+        self.gemma = gemma_agent or GemmaAgent()
         self._image_sets: dict[str, dict[str, Any]] = {}
 
     def analyze_aesthetics(self, image_data: dict[str, Any]) -> dict[str, Any]:

@@ -42,6 +42,17 @@ See agents/parallel.py for detailed parallel architecture documentation.
 from .model_agent import ModelAgent
 from .image_agent import ImageAgent
 from .art_agent import ArtAgent
+from .gemma_agent import GemmaAgent
+from .spine import MasterSpineCoordinator, get_spine
+from .video_agent import VideoAgent
+from .coder_agent import CoderAgent
+from .auto_healer import AutoHealer
+from .debate_engine import DebateEngine
+from .rag_agent import RAGAgent
+from .evolution_engine import AutonomousEvolutionEngine
+from .trainer_agent import SelfOptimizingVisualTrainer
+from .edge_optimizer import EdgeDiffusionOptimizer
+from .distributed_cluster import DistributedClusterManager
 from .orchestrator_agent import OrchestratorAgent, TaskPriority, TaskStatus, RecurrencePattern
 from .parallel import (
     ParallelEngine,
@@ -59,6 +70,18 @@ __all__ = [
     "ModelAgent",
     "ImageAgent",
     "ArtAgent",
+    "GemmaAgent",
+    "MasterSpineCoordinator",
+    "get_spine",
+    "VideoAgent",
+    "CoderAgent",
+    "AutoHealer",
+    "DebateEngine",
+    "RAGAgent",
+    "AutonomousEvolutionEngine",
+    "SelfOptimizingVisualTrainer",
+    "EdgeDiffusionOptimizer",
+    "DistributedClusterManager",
     "OrchestratorAgent",
     # Orchestrator enums
     "TaskPriority",

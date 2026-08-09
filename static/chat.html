@@ -1,0 +1,438 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gemma AI Local Chat - SenaAIgent</title>
+    <style>
+        :root {
+            --bg-dark: #0f172a;
+            --bg-card: #1e293b;
+            --bg-hover: #334155;
+            --text-primary: #f8fafc;
+            --text-muted: #94a3b8;
+            --accent: #6366f1;
+            --accent-glow: rgba(99, 102, 241, 0.25);
+            --user-msg: #3b82f6;
+            --bot-msg: #1e293b;
+            --success: #22c55e;
+            --warning: #f59e0b;
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: 'Inter', system-ui, -apple-system, sans-serif;
+            background: var(--bg-dark);
+            color: var(--text-primary);
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        /* App Bar Header */
+        header {
+            background: var(--bg-card);
+            padding: 1rem 2rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-bottom: 1px solid rgba(255,255,255,0.08);
+            box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+        }
+
+        .header-title {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+        }
+
+        .header-title h1 {
+            font-size: 1.25rem;
+            font-weight: 700;
+            background: linear-gradient(135deg, #a5b4fc, #38bdf8);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .badge {
+            padding: 0.25rem 0.6rem;
+            border-radius: 9999px;
+            font-size: 0.75rem;
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            gap: 0.4rem;
+        }
+
+        .badge-success { background: rgba(34, 197, 94, 0.15); color: var(--success); border: 1px solid rgba(34, 197, 94, 0.3); }
+        .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--success); animation: blink 1.8s infinite; }
+
+        @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+
+        .header-nav { display: flex; gap: 1rem; align-items: center; }
+
+        .nav-btn {
+            background: var(--bg-hover);
+            color: var(--text-primary);
+            padding: 0.4rem 0.8rem;
+            border-radius: 0.5rem;
+            text-decoration: none;
+            font-size: 0.85rem;
+            transition: all 0.2s;
+        }
+
+        .nav-btn:hover { background: #475569; }
+
+        /* Main Chat Layout */
+        .chat-container {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            max-width: 1000px;
+            width: 100%;
+            margin: 0 auto;
+            padding: 1.5rem;
+            overflow: hidden;
+        }
+
+        .messages-box {
+            flex: 1;
+            overflow-y: auto;
+            padding-right: 0.5rem;
+            display: flex;
+            flex-direction: column;
+            gap: 1.25rem;
+            scroll-behavior: smooth;
+        }
+
+        .message {
+            display: flex;
+            gap: 0.75rem;
+            max-width: 85%;
+            animation: fadeIn 0.3s ease-out;
+        }
+
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+
+        .message-user { align-self: flex-end; flex-direction: row-reverse; }
+        .message-bot { align-self: flex-start; }
+
+        .avatar {
+            width: 36px;
+            height: 36px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: bold;
+            font-size: 0.85rem;
+            flex-shrink: 0;
+        }
+
+        .avatar-user { background: var(--user-msg); color: white; }
+        .avatar-bot { background: linear-gradient(135deg, var(--accent), #818cf8); color: white; }
+
+        .bubble {
+            padding: 0.85rem 1.15rem;
+            border-radius: 1rem;
+            line-height: 1.5;
+            font-size: 0.95rem;
+            white-space: pre-wrap;
+            word-break: break-word;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+        }
+
+        .bubble-user {
+            background: var(--user-msg);
+            color: white;
+            border-bottom-right-radius: 0.2rem;
+        }
+
+        .bubble-bot {
+            background: var(--bot-msg);
+            color: var(--text-primary);
+            border: 1px solid rgba(255,255,255,0.08);
+            border-bottom-left-radius: 0.2rem;
+        }
+
+        /* Chips Bar */
+        .chips-container {
+            display: flex;
+            gap: 0.5rem;
+            margin-top: 1rem;
+            margin-bottom: 0.75rem;
+            overflow-x: auto;
+            padding-bottom: 0.25rem;
+        }
+
+        .chip {
+            background: rgba(255,255,255,0.05);
+            border: 1px solid rgba(255,255,255,0.1);
+            color: var(--text-muted);
+            padding: 0.35rem 0.75rem;
+            border-radius: 9999px;
+            font-size: 0.8rem;
+            cursor: pointer;
+            white-space: nowrap;
+            transition: all 0.2s;
+        }
+
+        .chip:hover {
+            background: var(--accent-glow);
+            color: var(--text-primary);
+            border-color: var(--accent);
+        }
+
+        /* Input Controls */
+        .input-area {
+            background: var(--bg-card);
+            border: 1px solid rgba(255,255,255,0.12);
+            border-radius: 0.75rem;
+            padding: 0.5rem 0.75rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            box-shadow: 0 4px 16px rgba(0,0,0,0.3);
+        }
+
+        .chat-input {
+            flex: 1;
+            background: transparent;
+            border: none;
+            outline: none;
+            color: var(--text-primary);
+            font-size: 0.95rem;
+            padding: 0.5rem;
+        }
+
+        .send-btn {
+            background: var(--accent);
+            color: white;
+            border: none;
+            padding: 0.6rem 1.2rem;
+            border-radius: 0.5rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+
+        .send-btn:hover { background: #4f46e5; }
+        .mic-btn {
+            background: rgba(99, 102, 241, 0.2);
+            color: #38bdf8;
+            border: 1px solid rgba(99, 102, 241, 0.4);
+            padding: 0.6rem 0.9rem;
+            border-radius: 0.5rem;
+            font-size: 1.1rem;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .mic-btn:hover { background: rgba(99, 102, 241, 0.35); }
+        .mic-btn.listening { background: rgba(239, 68, 68, 0.3); border-color: #ef4444; color: #ff8080; animation: blink 1s infinite; }
+    </style>
+</head>
+<body>
+    <header>
+        <div class="header-title">
+            <span>🤖</span>
+            <h1>Gemma Local AI Assistant</h1>
+            <div class="badge badge-success">
+                <div class="dot"></div>
+                <span id="hardwareBadge">Apple M5 Pro Metal GPU</span>
+            </div>
+        </div>
+        <div class="header-nav">
+            <label style="font-size:0.8rem; display:flex; align-items:center; gap:0.3rem; color:var(--text-muted); cursor:pointer;">
+                <input type="checkbox" id="autoTTSToggle" checked> 🔊 Auto-Speak
+            </label>
+            <a href="/dashboard" class="nav-btn">📊 System Dashboard</a>
+            <button onclick="clearChat()" class="nav-btn">🧹 Clear</button>
+        </div>
+    </header>
+
+    <div class="chat-container">
+        <div class="messages-box" id="messagesBox">
+            <div class="message message-bot">
+                <div class="avatar avatar-bot">⚡</div>
+                <div class="bubble bubble-bot">Hello! I am **Gemma**, running locally on your Apple Silicon hardware. How can I assist you today?</div>
+            </div>
+        </div>
+
+        <div class="chips-container">
+            <div class="chip" onclick="useChip(this)">Explain quantum computing simply</div>
+            <div class="chip" onclick="useChip(this)">Analyze water telemetry risk</div>
+            <div class="chip" onclick="useChip(this)">Synthesize Python tool for file sorting</div>
+            <div class="chip" onclick="useChip(this)">Optimize agent task queue priorities</div>
+        </div>
+
+        <div class="input-area">
+            <input type="text" id="userInput" class="chat-input" placeholder="Type or dictate your message to Gemma..." onkeydown="if(event.key==='Enter') sendMessage()">
+            <button id="micBtn" class="mic-btn" title="Voice dictation" onclick="toggleChatMic()">🎙️</button>
+            <button id="sendBtn" class="send-btn" onclick="sendMessage()">Send ➔</button>
+        </div>
+    </div>
+
+    <script>
+        const API_BASE = window.location.origin;
+        const messagesBox = document.getElementById('messagesBox');
+        const userInput = document.getElementById('userInput');
+        const sendBtn = document.getElementById('sendBtn');
+        const micBtn = document.getElementById('micBtn');
+
+        let recognition = null;
+        let isListening = false;
+
+        function initChatVoice() {
+            const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+            if (SpeechRecognition) {
+                recognition = new SpeechRecognition();
+                recognition.continuous = false;
+                recognition.interimResults = true;
+                recognition.lang = 'en-US';
+
+                recognition.onstart = function() {
+                    isListening = true;
+                    micBtn.classList.add('listening');
+                };
+
+                recognition.onresult = function(event) {
+                    let transcript = '';
+                    for (let i = event.resultIndex; i < event.results.length; ++i) {
+                        transcript += event.results[i][0].transcript;
+                    }
+                    userInput.value = transcript;
+                };
+
+                recognition.onerror = recognition.onend = function() {
+                    isListening = false;
+                    micBtn.classList.remove('listening');
+                };
+            }
+        }
+
+        function toggleChatMic() {
+            if (!recognition) {
+                alert('Web Speech recognition is not supported in this browser context.');
+                return;
+            }
+            if (isListening) {
+                recognition.stop();
+            } else {
+                recognition.start();
+            }
+        }
+
+        function speakResponse(text) {
+            if (!('speechSynthesis' in window) || !text) return;
+            window.speechSynthesis.cancel();
+            const cleanText = text.replace(/```[\s\S]*?```/g, 'Code block omitted for speech.').substring(0, 450);
+            const utterance = new SpeechSynthesisUtterance(cleanText);
+            utterance.rate = 1.05;
+            window.speechSynthesis.speak(utterance);
+        }
+
+        function appendMessage(role, text) {
+            const msgDiv = document.createElement('div');
+            msgDiv.className = `message message-${role}`;
+
+            const avatar = document.createElement('div');
+            avatar.className = `avatar avatar-${role}`;
+            avatar.textContent = role === 'user' ? 'YOU' : '⚡';
+
+            const bubble = document.createElement('div');
+            bubble.className = `bubble bubble-${role}`;
+            bubble.textContent = text;
+
+            msgDiv.appendChild(avatar);
+            msgDiv.appendChild(bubble);
+            messagesBox.appendChild(msgDiv);
+            messagesBox.scrollTop = messagesBox.scrollHeight;
+            return bubble;
+        }
+
+        async function sendMessage() {
+            const prompt = userInput.value.trim();
+            if (!prompt) return;
+
+            appendMessage('user', prompt);
+            userInput.value = '';
+            sendBtn.disabled = true;
+
+            const botBubble = appendMessage('bot', '');
+            botBubble.textContent = 'Thinking...';
+
+            try {
+                const eventSource = new EventSource(`${API_BASE}/api/gemma/stream?prompt=${encodeURIComponent(prompt)}`);
+                let responseText = '';
+
+                eventSource.onmessage = function(event) {
+                    if (event.data === '[DONE]') {
+                        eventSource.close();
+                        sendBtn.disabled = false;
+                        if (document.getElementById('autoTTSToggle')?.checked) {
+                            speakResponse(responseText);
+                        }
+                    } else {
+                        responseText += event.data + ' ';
+                        botBubble.textContent = responseText;
+                        messagesBox.scrollTop = messagesBox.scrollHeight;
+                    }
+                };
+
+                eventSource.onerror = function() {
+                    eventSource.close();
+                    if (!responseText) {
+                        fetchFallback(prompt, botBubble);
+                    } else {
+                        sendBtn.disabled = false;
+                        if (document.getElementById('autoTTSToggle')?.checked) {
+                            speakResponse(responseText);
+                        }
+                    }
+                };
+            } catch (err) {
+                fetchFallback(prompt, botBubble);
+            }
+        }
+
+        async function fetchFallback(prompt, botBubble) {
+            try {
+                const res = await fetch(`${API_BASE}/api/gemma`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ action: 'generate', prompt })
+                });
+                const data = await res.json();
+                const resp = data.response || 'Inference processed successfully.';
+                botBubble.textContent = resp;
+                if (document.getElementById('autoTTSToggle')?.checked) {
+                    speakResponse(resp);
+                }
+            } catch (e) {
+                botBubble.textContent = 'Error connecting to Gemma engine.';
+            } finally {
+                sendBtn.disabled = false;
+            }
+        }
+
+        function useChip(chip) {
+            userInput.value = chip.textContent;
+            sendMessage();
+        }
+
+        function clearChat() {
+            messagesBox.innerHTML = `
+                <div class="message message-bot">
+                    <div class="avatar avatar-bot">⚡</div>
+                    <div class="bubble bubble-bot">Chat history cleared. How can I help you?</div>
+                </div>
+            `;
+        }
+
+        initChatVoice();
+    </script>
+</body>
+</html>

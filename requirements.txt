@@ -7,6 +7,21 @@ Werkzeug>=3.0.0
 numpy>=1.26.0
 scikit-learn>=1.4.0
 pandas>=2.1.0
+pillow>=10.0.0
+
+# Local diffusion stack (PyTorch MPS on Apple Silicon)
+torch>=2.1.0
+torchvision>=0.16.0
+diffusers>=0.27.0
+transformers>=4.40.0
+accelerate>=0.30.0
+safetensors>=0.4.0
+
+# LoRA fine-tuning of the diffusion UNet
+peft>=0.10.0
+
+# Process/port inspection for the CleanHouse pre-flight sweep
+psutil>=5.9.0
 
 # HTTP client for external API calls
 requests>=2.31.0
@@ -19,3 +34,6 @@ pytest-cov>=4.1.0
 # joblib>=1.3.0
 # tensorflow>=2.15.0
 # torch>=2.1.0
+
+# Video decoding for training-frame extraction
+av>=12.0.0

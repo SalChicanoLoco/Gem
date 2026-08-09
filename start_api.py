@@ -14,8 +14,19 @@ sys.path.insert(0, project_root)
 # Set PYTHONPATH environment variable for subprocess compatibility
 os.environ['PYTHONPATH'] = project_root + os.pathsep + os.environ.get('PYTHONPATH', '')
 
-# Get port from environment or use default
-port = int(os.environ.get('PORT', 5000))
+# Run CleanHouse Pre-Flight Sweep
+try:
+    from scripts.cleanhouse import cleanhouse
+    print("🧹 CleanHouse: Running pre-flight port sweep...")
+    ch_report = cleanhouse(ports=[5000, 5005, 8000, 8080])
+    if ch_report["cleaned_processes"]:
+        print(f"🧹 Cleaned stale webserver processes: {ch_report['cleaned_processes']}")
+    default_port = ch_report["recommended_port"]
+except Exception as e:
+    default_port = 5005
+
+# Get port from environment or use CleanHouse recommended clean port
+port = int(os.environ.get('PORT', default_port))
 debug = os.environ.get('FLASK_DEBUG', 'false').lower() == 'true'
 
 print("=" * 60)
@@ -26,12 +37,16 @@ print(f"Port: {port}")
 print(f"Debug mode: {debug}")
 print()
 print("Available endpoints:")
-print(f"  - Health check:     http://localhost:{port}/")
-print(f"  - Water quality:    http://localhost:{port}/api/water")
-print(f"  - Image generation: http://localhost:{port}/api/image")
-print(f"  - Art analysis:     http://localhost:{port}/api/art")
-print(f"  - Orchestrator:     http://localhost:{port}/api/orchestrator")
-print(f"  - Dashboard:        http://localhost:{port}/dashboard")
+print(f"  - Health check:        http://localhost:{port}/")
+print(f"  - OpenAI IDE Gateway: http://localhost:{port}/v1/chat/completions")
+print(f"  - OpenAI Models List:  http://localhost:{port}/v1/models")
+print(f"  - Coding Agent API:    http://localhost:{port}/api/coder")
+print(f"  - PyTorch MPS Diffusion:http://localhost:{port}/api/image/diffusion")
+print(f"  - Water quality:       http://localhost:{port}/api/water")
+print(f"  - Image generation:    http://localhost:{port}/api/image")
+print(f"  - Art analysis:        http://localhost:{port}/api/art")
+print(f"  - Orchestrator:        http://localhost:{port}/api/orchestrator")
+print(f"  - Dashboard:           http://localhost:{port}/dashboard")
 print()
 print("Press Ctrl+C to stop the server")
 print("=" * 60)

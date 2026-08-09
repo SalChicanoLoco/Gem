@@ -4,22 +4,67 @@ aesthetic analysis, and agent orchestration.
 """
 
 import os
-from flask import Flask, jsonify, request, send_from_directory
+import time
+from flask import Flask, jsonify, request, send_from_directory, Response, stream_with_context, make_response
 
-from agents import ModelAgent, ImageAgent, ArtAgent, OrchestratorAgent, TaskPriority, RecurrencePattern
+from agents import (
+    ModelAgent,
+    ImageAgent,
+    ArtAgent,
+    GemmaAgent,
+    VideoAgent,
+    CoderAgent,
+    AutoHealer,
+    DebateEngine,
+    RAGAgent,
+    AutonomousEvolutionEngine,
+    SelfOptimizingVisualTrainer,
+    EdgeDiffusionOptimizer,
+    DistributedClusterManager,
+    OrchestratorAgent,
+    TaskPriority,
+    RecurrencePattern,
+    get_spine,
+)
 
 
 def create_app():
     """Application factory for the Flask app."""
     app = Flask(__name__, static_folder='../static', static_url_path='/static')
 
-    # Initialize agents
-    model_agent = ModelAgent()
+    # Initialize Master Spine & Agents
+    spine = get_spine()
+    gemma_agent = GemmaAgent()
+    model_agent = ModelAgent(gemma_agent=gemma_agent)
     image_agent = ImageAgent()
-    art_agent = ArtAgent()
+    art_agent = ArtAgent(gemma_agent=gemma_agent)
+    video_agent = VideoAgent(gemma_agent=gemma_agent)
+    coder_agent = CoderAgent(gemma_agent=gemma_agent)
+    auto_healer = AutoHealer(gemma_agent=gemma_agent)
+    debate_engine = DebateEngine(gemma_agent=gemma_agent)
+    rag_agent = RAGAgent(gemma_agent=gemma_agent)
+    evolution_engine = AutonomousEvolutionEngine(
+        gemma_agent=gemma_agent,
+        coder_agent=coder_agent,
+        auto_healer=auto_healer,
+        debate_engine=debate_engine,
+    )
+    visual_trainer = SelfOptimizingVisualTrainer(
+        gemma_agent=gemma_agent,
+        diffusion_engine=image_agent.diffusion_engine,
+        video_agent=video_agent,
+    )
+    edge_optimizer = EdgeDiffusionOptimizer(
+        diffusion_engine=image_agent.diffusion_engine,
+        gemma_agent=gemma_agent,
+    )
+    cluster_manager = DistributedClusterManager()
     orchestrator = OrchestratorAgent()
 
     # Register agents with orchestrator
+    orchestrator.register_agent("gemma", "gemma", gemma_agent, ["generate", "analyze_telemetry", "self_optimize_workflow"])
+    orchestrator.register_agent("video", "video", video_agent, ["create_clip"])
+    orchestrator.register_agent("coder", "coder", coder_agent, ["synthesize_tool", "execute_tool"])
     orchestrator.register_agent("model", "model", model_agent, ["predict", "analyze"])
     orchestrator.register_agent("image", "image", image_agent, ["generate_image"])
     orchestrator.register_agent("art", "art", art_agent, ["analyze_aesthetics", "create_set"])
@@ -29,16 +74,237 @@ def create_app():
         """Health check endpoint."""
         return jsonify({
             "status": "healthy",
-            "service": "SenaAIgent",
-            "version": "1.0.0",
+            "service": "SenaAIgent Pre-AI OS (Gemma Edition)",
+            "version": "1.2.0",
+            "gemma_status": gemma_agent.get_status(),
+            "spine_status": spine.get_status(),
             "endpoints": {
                 "health": "/",
+                "gemma_intelligence": "/api/gemma",
+                "gemma_stream": "/api/gemma/stream",
+                "video_creator": "/api/video",
+                "master_spine": "/api/spine",
+                "coder_synthesizer": "/api/coder",
+                "debate_engine": "/api/debate",
+                "edge_rag": "/api/rag",
                 "water_quality": "/api/water",
                 "image_generation": "/api/image",
                 "art_analysis": "/api/art",
                 "orchestrator": "/api/orchestrator",
             },
         })
+
+    @app.route("/api/gemma", methods=["GET", "POST"])
+    def gemma_intelligence():
+        """
+        Gemma Local LLM Intelligence endpoint.
+
+        GET: Returns status and capabilities of local Gemma agent.
+        POST: Executes LLM reasoning, telemetry analysis, or meta-orchestrator optimization.
+
+        POST Body (JSON):
+            - action: str ("generate", "analyze_telemetry", "self_optimize")
+            - prompt: str (for generate)
+            - telemetry: dict (for analyze_telemetry)
+        """
+        if request.method == "GET":
+            return jsonify({
+                "endpoint": "/api/gemma",
+                "description": "Local Gemma LLM Reasoning & Meta-Orchestrator",
+                "status": gemma_agent.get_status(),
+                "methods": ["GET", "POST"],
+                "actions": {
+                    "generate": "Generate text or code using local Gemma model",
+                    "analyze_telemetry": "Deep LLM analysis on system/environmental data",
+                    "self_optimize": "Autonomous queue and task optimization",
+                },
+                "example_request": {
+                    "action": "generate",
+                    "prompt": "Synthesize optimal task execution plan for multi-agent pool",
+                },
+            })
+
+        try:
+            data = request.get_json() or {}
+            action = data.get("action", "generate")
+
+            if action == "generate":
+                prompt = data.get("prompt", "Hello Gemma")
+                system = data.get("system")
+                response = gemma_agent.generate(prompt, system=system)
+                return jsonify({
+                    "success": True,
+                    "model": gemma_agent.model_name,
+                    "prompt": prompt,
+                    "response": response,
+                })
+
+            elif action == "analyze_telemetry":
+                telemetry = data.get("telemetry", {})
+                result = gemma_agent.analyze_telemetry(telemetry)
+                return jsonify(result)
+
+            elif action == "self_optimize":
+                queue_status = orchestrator.get_queue_status()
+                load_metrics = orchestrator.get_load_metrics()
+                result = gemma_agent.self_optimize_workflow(queue_status, load_metrics)
+                return jsonify(result)
+
+            else:
+                return jsonify({"success": False, "error": f"Unknown action: {action}"}), 400
+
+        except Exception as e:
+            return jsonify({"success": False, "error": str(e)}), 500
+
+    @app.route("/api/gemma/stream", methods=["GET", "POST"])
+    def gemma_stream():
+        """
+        Live SSE Text Streaming Endpoint.
+        Streams Gemma token responses word-by-word via Server-Sent Events.
+        """
+        prompt = request.args.get("prompt") or (request.get_json() or {}).get("prompt", "Hello Gemma")
+
+        def generate_sse():
+            full_response = gemma_agent.generate(prompt)
+            words = full_response.split(" ")
+            for word in words:
+                yield f"data: {word} \n\n"
+                time.sleep(0.04)
+            yield "data: [DONE]\n\n"
+
+        return Response(stream_with_context(generate_sse()), content_type="text/event-stream")
+
+    @app.route("/api/video", methods=["GET", "POST"])
+    def video_creator():
+        """
+        Quetzal Video Clip Diffusion Engine Endpoint.
+
+        GET: Returns video creator status and available styles.
+        POST: Generates an animated video clip based on prompt and parameters.
+        """
+        if request.method == "GET":
+            return jsonify({
+                "endpoint": "/api/video",
+                "description": "Quetzal Video Clip Diffusion Engine",
+                "methods": ["GET", "POST"],
+                "styles": ["quetzal_diffusion", "cybernetic", "surreal", "cosmic"],
+                "example_request": {
+                    "prompt": "Cybernetic Quetzal flying over emerald city",
+                    "width": 512,
+                    "height": 512,
+                    "num_frames": 16,
+                    "fps": 8,
+                    "style": "quetzal_diffusion",
+                },
+            })
+
+        try:
+            data = request.get_json() or {}
+            prompt = data.get("prompt", "Quetzal Diffusion motion keyframe")
+            width = int(data.get("width", 512))
+            height = int(data.get("height", 512))
+            num_frames = int(data.get("num_frames", 16))
+            fps = int(data.get("fps", 8))
+            style = data.get("style", "quetzal_diffusion")
+
+            result = video_agent.create_clip(
+                prompt=prompt,
+                width=width,
+                height=height,
+                num_frames=num_frames,
+                fps=fps,
+                style=style,
+            )
+            return jsonify(result)
+
+        except Exception as e:
+            return jsonify({"success": False, "error": str(e)}), 500
+
+    @app.route("/api/spine", methods=["GET", "POST"])
+    def master_spine_control():
+        """
+        Master Execution Spine control endpoint.
+        """
+        if request.method == "GET":
+            return jsonify(spine.get_status())
+
+        data = request.get_json() or {}
+        if "strict_sequential" in data:
+            spine.set_strict_sequential(bool(data["strict_sequential"]))
+        return jsonify(spine.get_status())
+
+    @app.route("/api/coder", methods=["GET", "POST"])
+    def coder_tool_synthesizer():
+        """
+        Self-Extending Coder Tool Synthesizer and Coding Engine endpoint.
+        """
+        if request.method == "GET":
+            return jsonify({"description": "Self-Extending Coder Tool Synthesizer & Coding Engine"})
+        data = request.get_json() or {}
+        action = data.get("action", "synthesize")
+
+        if action == "generate":
+            spec = data.get("specification", "")
+            lang = data.get("language", "python")
+            ctx = data.get("context")
+            return jsonify(coder_agent.generate_code(spec, language=lang, context=ctx))
+        elif action == "analyze":
+            code = data.get("code", "")
+            return jsonify(coder_agent.analyze_codebase(code))
+        elif action == "refactor":
+            code = data.get("code", "")
+            goal = data.get("goal", "Refactor and optimize code")
+            return jsonify(coder_agent.refactor_code(code, goal))
+        elif action == "tests":
+            code = data.get("code", "")
+            return jsonify(coder_agent.generate_tests(code))
+        elif action in ["synthesize", "synthesize_tool"]:
+            desc = data.get("task_description") or data.get("requirement", "Process dictionary payload")
+            res = coder_agent.synthesize_tool(desc, tool_name=data.get("tool_name"))
+            return jsonify(res)
+        elif action == "execute":
+            res = coder_agent.execute_tool(data.get("tool_name", ""), data.get("payload", {}))
+            return jsonify(res)
+        return jsonify({"error": f"Unknown action: {action}"}), 400
+
+    @app.route("/api/debate", methods=["GET", "POST"])
+    def debate_consensus():
+        """
+        Multi-Agent Debate & Consensus Engine endpoint.
+        """
+        if request.method == "GET":
+            return jsonify({"description": "Multi-Agent Persona Debate Engine"})
+        data = request.get_json() or {}
+        topic = data.get("topic", "System Architecture & Security Assessment")
+        proposal = data.get("proposal", {})
+        rounds = int(data.get("rounds", 2))
+        res = debate_engine.run_debate(topic, proposal, rounds=rounds)
+        return jsonify(res)
+
+    @app.route("/api/rag", methods=["GET", "POST"])
+    def edge_rag():
+        """
+        Local Edge RAG Engine endpoint.
+        """
+        if request.method == "GET":
+            return jsonify({"description": "Local Edge Zero-Cloud RAG Engine"})
+        data = request.get_json() or {}
+        action = data.get("action", "query")
+        if action == "ingest":
+            doc_id = data.get("doc_id", "doc_1")
+            text = data.get("text", "")
+            chunks = rag_agent.ingest_text(doc_id, text)
+            return jsonify({"success": True, "doc_id": doc_id, "chunks_created": chunks})
+        elif action in ["ingest_url", "web_ingest", "web_data"]:
+            url = data.get("url", "")
+            if not url:
+                return jsonify({"success": False, "error": "url is required"}), 400
+            res = rag_agent.ingest_url(url)
+            return jsonify(res)
+        elif action == "query":
+            res = rag_agent.query(data.get("query", "Summarize ingested documents"))
+            return jsonify(res)
+        return jsonify({"error": "Unknown action"}), 400
 
     @app.route("/api/water", methods=["GET", "POST"])
     def water_quality():
@@ -552,6 +818,189 @@ def create_app():
         except Exception as e:
             return jsonify({"success": False, "error": str(e)}), 500
 
+    # =========================================================================
+    # OPENAI COMPATIBILITY GATEWAY FOR ANTIGRAVITY IDE & EXTERNAL CLIENTS
+    # =========================================================================
+
+    @app.route("/v1/models", methods=["GET"])
+    def list_openai_models():
+        """OpenAI-compatible models list endpoint."""
+        status = gemma_agent.get_status()
+        return jsonify({
+            "object": "list",
+            "data": [
+                {
+                    "id": status.get("model", "gemma2:2b"),
+                    "object": "model",
+                    "created": int(time.time()),
+                    "owned_by": "senaai-gemma",
+                    "hardware_acceleration": status.get("hardware_acceleration", "Apple Silicon MPS"),
+                },
+                {
+                    "id": "senaai-coder",
+                    "object": "model",
+                    "created": int(time.time()),
+                    "owned_by": "senaai-gemma",
+                },
+                {
+                    "id": "senaai-diffusion",
+                    "object": "model",
+                    "created": int(time.time()),
+                    "owned_by": "pytorch-mps",
+                },
+            ],
+        })
+
+    @app.route("/v1/chat/completions", methods=["POST"])
+    def openai_chat_completions():
+        """
+        OpenAI-compatible chat completions endpoint for Antigravity IDE integration.
+        """
+        try:
+            data = request.get_json() or {}
+            messages = data.get("messages", [])
+            model = data.get("model", "gemma2:2b")
+            temperature = data.get("temperature", 0.7)
+
+            prompt_parts = []
+            system_msg = None
+            for msg in messages:
+                role = msg.get("role")
+                content = msg.get("content", "")
+                if role == "system":
+                    system_msg = content
+                elif role == "user":
+                    prompt_parts.append(f"User: {content}")
+                elif role == "assistant":
+                    prompt_parts.append(f"Assistant: {content}")
+
+            prompt = "\n".join(prompt_parts) if prompt_parts else "Hello"
+            response_text = gemma_agent.generate(prompt, system=system_msg, temperature=temperature)
+
+            return jsonify({
+                "id": f"chatcmpl-senaai-{int(time.time())}",
+                "object": "chat.completion",
+                "created": int(time.time()),
+                "model": model,
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": response_text,
+                        },
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": len(prompt.split()),
+                    "completion_tokens": len(response_text.split()),
+                    "total_tokens": len(prompt.split()) + len(response_text.split()),
+                },
+            })
+        except Exception as e:
+            return jsonify({"error": f"OpenAI Gateway Error: {str(e)}"}), 500
+
+    # =========================================================================
+    # PYTORCH DIFFUSION ENDPOINT
+    # =========================================================================
+
+    @app.route("/api/image/diffusion", methods=["POST"])
+    def local_diffusion_api():
+        """API endpoint for PyTorch MPS Apple Silicon local image diffusion."""
+        try:
+            data = request.get_json() or {}
+            prompt = data.get("prompt", "")
+            width = data.get("width", 512)
+            height = data.get("height", 512)
+            num_steps = data.get("num_inference_steps", 20)
+            neg_prompt = data.get("negative_prompt")
+            raw_mode = data.get("raw_mode", False)
+            model_id = data.get("model_id")
+            quality_preset = data.get("quality_preset", False)
+            lora_path = data.get("lora_path")
+            return jsonify(image_agent.diffusion_engine.generate(
+                prompt=prompt,
+                width=width,
+                height=height,
+                num_inference_steps=num_steps,
+                negative_prompt=neg_prompt,
+                raw_mode=raw_mode,
+                model_id=model_id,
+                quality_preset=quality_preset,
+                lora_path=lora_path,
+            ))
+        except Exception as e:
+            return jsonify({"success": False, "error": str(e)}), 500
+
+    @app.route("/api/evolution", methods=["GET", "POST"])
+    def evolution_cycle_api():
+        """Autonomous Evolution & Self-Improvement Cycle API."""
+        try:
+            if request.method == "GET":
+                return jsonify({"status": "ready", "history_cycles": len(evolution_engine.evolution_history)})
+            data = request.get_json() or {}
+            goal = data.get("goal", "Optimize system performance and repair code bottlenecks")
+            return jsonify(evolution_engine.run_evolution_cycle(target_goal=goal))
+        except Exception as e:
+            return jsonify({"success": False, "error": str(e)}), 500
+
+    @app.route("/api/trainer", methods=["POST"])
+    def visual_trainer_api():
+        """API endpoint for metadata extraction and iterative visual training."""
+        try:
+            data = request.get_json() or {}
+            ref_path = data.get("reference_path", "")
+            description = data.get("description", "")
+            max_iter = data.get("max_iterations", 3)
+            target_score = data.get("target_score", 85.0)
+
+            if not ref_path:
+                return jsonify({"success": False, "error": "reference_path is required"}), 400
+
+            return jsonify(visual_trainer.train_image_match_loop(
+                reference_path=ref_path,
+                user_description=description,
+                max_iterations=max_iter,
+                target_score=target_score,
+            ))
+        except Exception as e:
+            return jsonify({"success": False, "error": str(e)}), 500
+
+    @app.route("/api/edge_optimizer", methods=["GET", "POST"])
+    def edge_optimizer_api():
+        """API endpoint for autonomous consumer hardware edge diffusion optimization."""
+        try:
+            if request.method == "POST":
+                data = request.get_json() or {}
+                target_speed = data.get("target_it_per_sec", 8.0)
+                return jsonify(edge_optimizer.run_self_optimization_loop(
+                    target_it_per_sec=target_speed,
+                ))
+            return jsonify(edge_optimizer.benchmark_profile())
+        except Exception as e:
+            return jsonify({"success": False, "error": str(e)}), 500
+
+    @app.route("/api/cluster", methods=["GET", "POST"])
+    def cluster_api():
+        """API endpoint for multi-Mac local network edge cluster management and batch dispatch."""
+        try:
+            if request.method == "POST":
+                data = request.get_json() or {}
+                action = data.get("action", "register")
+                if action == "register":
+                    node_id = data.get("node_id", f"node_{int(time.time())}")
+                    url = data.get("url", "")
+                    if not url:
+                        return jsonify({"success": False, "error": "Node url is required"}), 400
+                    return jsonify(cluster_manager.register_node(node_id=node_id, url=url))
+                elif action == "batch":
+                    prompts = data.get("prompts", [])
+                    return jsonify(cluster_manager.distribute_batch_generation(prompts=prompts))
+            return jsonify({"success": True, "active_nodes": cluster_manager.get_active_nodes()})
+        except Exception as e:
+            return jsonify({"success": False, "error": str(e)}), 500
+
     @app.route("/api/dashboard", methods=["GET"])
     def dashboard_api():
         """
@@ -570,12 +1019,53 @@ def create_app():
         Returns:
             JSON with load gauge data and metrics.
         """
-        return jsonify(orchestrator.get_load_metrics())
+    @app.after_request
+    def add_no_cache_headers(response):
+        """Ensure static files and HTML pages are never cached by the browser."""
+        response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+        return response
+
+    @app.route("/api/trainer/fine_tune", methods=["POST"])
+    def trainer_fine_tune_api():
+        """Run full local model fine-tuning & weight optimization loop."""
+        try:
+            data = request.get_json() or {}
+            training_dir = data.get("training_dir", "static/training_data")
+            max_steps = int(data.get("max_steps", 200))
+            lr = float(data.get("learning_rate", 1e-4))
+            res = visual_trainer.run_full_model_training(
+                training_dir=training_dir, max_steps=max_steps, learning_rate=lr
+            )
+            return jsonify(res)
+        except Exception as e:
+            return jsonify({"success": False, "error": str(e)}), 500
+
+    @app.route("/api/trainer/subject", methods=["POST"])
+    def trainer_subject_api():
+        """Auto-fetch dataset & fine-tune model weights for a specific subject (e.g. roadrunner)."""
+        try:
+            data = request.get_json() or {}
+            subject = data.get("subject", "roadrunner")
+            res = visual_trainer.fetch_and_train_subject(subject_name=subject)
+            return jsonify(res)
+        except Exception as e:
+            return jsonify({"success": False, "error": str(e)}), 500
 
     @app.route("/dashboard")
     def dashboard_page():
-        """Serve the dashboard frontend."""
-        return send_from_directory(app.static_folder, 'dashboard.html')
+        """Serve the dashboard frontend with strict no-cache control."""
+        resp = make_response(send_from_directory(app.static_folder, 'dashboard.html'))
+        resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate, max-age=0"
+        resp.headers["Pragma"] = "no-cache"
+        resp.headers["Expires"] = "0"
+        return resp
+
+    @app.route("/chat")
+    def chat_page():
+        """Serve the live chat frontend."""
+        return send_from_directory(app.static_folder, 'chat.html')
 
     @app.errorhandler(404)
     def not_found(e):
