@@ -919,6 +919,7 @@ def create_app():
             model_id = data.get("model_id")
             quality_preset = data.get("quality_preset", False)
             lora_path = data.get("lora_path")
+            seed = data.get("seed")
             return jsonify(image_agent.diffusion_engine.generate(
                 prompt=prompt,
                 width=width,
@@ -929,6 +930,7 @@ def create_app():
                 model_id=model_id,
                 quality_preset=quality_preset,
                 lora_path=lora_path,
+                seed=seed,
             ))
         except Exception as e:
             return jsonify({"success": False, "error": str(e)}), 500

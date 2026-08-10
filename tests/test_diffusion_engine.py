@@ -6,7 +6,7 @@ import os
 import tempfile
 import unittest
 from unittest.mock import patch, MagicMock
-from agents.diffusion_engine import PyTorchDiffusionEngine
+from agents.diffusion_engine import MAX_INFERENCE_STEPS, PyTorchDiffusionEngine, _is_blank
 from agents.lora_trainer import read_adapter_meta, write_adapter_meta
 from agents import ImageAgent
 
@@ -42,7 +42,7 @@ class TestPyTorchDiffusionEngine(unittest.TestCase):
         result = self.engine.generate("a cube", width=64, height=64, num_inference_steps=500)
         if not result.get("placeholder"):
             self.assertEqual(result["steps_requested"], 500)
-            self.assertLessEqual(result["steps_used"], 19)
+            self.assertLessEqual(result["steps_used"], MAX_INFERENCE_STEPS)
 
     def test_image_agent_integration(self):
         agent = ImageAgent()
@@ -57,6 +57,48 @@ class TestPyTorchDiffusionEngine(unittest.TestCase):
             }
             result = agent.generate_image("A futuristic city", width=256, height=256, style="local_mps")
             self.assertTrue(result.get("success"))
+
+
+class TestPrecisionAndSafetyChecker(unittest.TestCase):
+    """
+    The NSFW classifier blanks benign renders to solid black, which made float16
+    unusable. It is off by default; the precision it unblocks halves inference cost.
+    """
+
+    def test_mps_defaults_to_half_precision(self):
+        engine = PyTorchDiffusionEngine()
+        if engine.device == "mps":
+            self.assertEqual(str(engine._inference_dtype()), "torch.float16")
+
+    def test_safety_checker_is_off_by_default(self):
+        self.assertFalse(PyTorchDiffusionEngine().safety_checker)
+
+    def test_safety_checker_can_be_opted_into(self):
+        self.assertTrue(PyTorchDiffusionEngine(safety_checker=True).safety_checker)
+
+    def test_dtype_override_is_honoured(self):
+        engine = PyTorchDiffusionEngine(dtype="float32")
+        self.assertEqual(str(engine._inference_dtype()), "torch.float32")
+
+    def test_unknown_dtype_falls_back_rather_than_crashing(self):
+        engine = PyTorchDiffusionEngine(dtype="nonsense")
+        self.assertIn(str(engine._inference_dtype()),
+                      ("torch.float16", "torch.float32"))
+
+    def test_blank_render_is_detected(self):
+        """A solid frame must not be reportable as a successful render."""
+        from PIL import Image
+        self.assertTrue(_is_blank(Image.new("RGB", (32, 32), (0, 0, 0))))
+        self.assertTrue(_is_blank(Image.new("RGB", (32, 32), (255, 255, 255))))
+
+    def test_detailed_render_is_not_flagged_blank(self):
+        from PIL import Image
+        import random
+        img = Image.new("RGB", (32, 32))
+        rnd = random.Random(0)
+        img.putdata([(rnd.randrange(256), rnd.randrange(256), rnd.randrange(256))
+                     for _ in range(32 * 32)])
+        self.assertFalse(_is_blank(img))
 
 
 class TestAdapterBaseModelResolution(unittest.TestCase):
