@@ -28,6 +28,13 @@ logger = logging.getLogger(__name__)
 # (~16s at 512x768). The budget is unchanged; the precision bought the steps.
 MAX_INFERENCE_STEPS = int(os.environ.get("MAX_INFERENCE_STEPS", "50"))
 
+# Models that render blank frames in half precision on MPS and so default to
+# float32 despite the speed cost. segmind/tiny-sd is distilled and its activations
+# evidently leave float16 range: measured at 512x512, 20 steps, it produced a solid
+# frame on 2 of 3 seeds in float16 and on 0 of 3 in float32, while SD 1.5 was clean
+# on every seed in both. An explicit dtype= or $DIFFUSION_DTYPE still overrides.
+FP16_UNSTABLE_ON_MPS = frozenset({"segmind/tiny-sd"})
+
 MINIMAL_NEGATIVE_PROMPT = "blurry, lowres, distorted"
 
 DEFAULT_NEGATIVE_PROMPT = (
@@ -131,9 +138,13 @@ class PyTorchDiffusionEngine:
         Precision for inference.
 
         float16 on MPS is ~2x faster than float32 for the same image: measured
-        3.5s against 7.1s at 19 steps, 512x512, with output statistics matching to
-        within a fraction of a percent. Training stays float32 (see LoRALocalTrainer)
-        because MPS autograd is unreliable in half precision; this is inference only.
+        3.5s against 7.1s at 19 steps, 512x512 on SD 1.5, with output statistics
+        matching to within a fraction of a percent. Training stays float32 (see
+        LoRALocalTrainer) because MPS autograd is unreliable in half precision;
+        this is inference only.
+
+        Not every model survives it — see FP16_UNSTABLE_ON_MPS. An explicit dtype
+        always wins, so that list sets a default rather than a restriction.
         """
         named = {"float16": torch.float16, "bfloat16": torch.bfloat16, "float32": torch.float32}
         if self.dtype_override:
@@ -141,7 +152,11 @@ class PyTorchDiffusionEngine:
             if chosen is not None:
                 return chosen
             logger.warning("Unknown dtype %r; falling back to default.", self.dtype_override)
-        return torch.float16 if self.device == "mps" else torch.float32
+        if self.device != "mps":
+            return torch.float32
+        if self.model_id in FP16_UNSTABLE_ON_MPS:
+            return torch.float32
+        return torch.float16
 
     def _resolve_base_model(self, target_model: Optional[str]) -> Optional[str]:
         """
@@ -387,10 +402,17 @@ class PyTorchDiffusionEngine:
 
                 blank = _is_blank(image)
                 if blank:
+                    hint = ""
+                    if self._inference_dtype() == torch.float16:
+                        hint = (
+                            f" This model may be unstable in half precision; retry with "
+                            f"dtype='float32' (or $DIFFUSION_DTYPE=float32), and consider adding "
+                            f"{self.model_id!r} to FP16_UNSTABLE_ON_MPS."
+                        )
                     logger.error(
-                        "Render for %r produced a blank image (dtype=%s, safety_checker=%s). "
-                        "Reported as blank_image rather than as a successful render.",
-                        prompt[:60], self._inference_dtype(), self.safety_checker,
+                        "Render for %r produced a blank image (model=%s, dtype=%s, safety_checker=%s). "
+                        "Reported as blank_image rather than as a successful render.%s",
+                        prompt[:60], self.model_id, self._inference_dtype(), self.safety_checker, hint,
                     )
 
                 # Convert to Base64

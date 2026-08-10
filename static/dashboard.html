@@ -301,6 +301,11 @@
             white-space: pre-wrap;
             margin-top: 1rem;
         }
+        /* A failed call must not read like console output from a working one. */
+        .output-console.console-error {
+            color: #f59e0b;
+            border-color: rgba(245, 158, 11, 0.4);
+        }
 
         /* Gauge & Metrics */
         .gauge-container {
@@ -658,6 +663,7 @@
                             <button class="btn btn-primary" onclick="streamGemma()">Stream</button>
                             <button class="btn btn-secondary" onclick="runSelfOptimize()">Self-Optimize</button>
                             <button class="btn btn-secondary" onclick="speakConsole('gemmaConsole')" title="Read aloud console output">🔊 Speak</button>
+                            <button class="btn btn-secondary" onclick="resetGemmaConsole()" title="Forget this console's conversation history">🧹 New</button>
                         </div>
                         <div id="gemmaConsole" class="output-console">Ready to stream Gemma token reasoning...</div>
                     </div>
@@ -1167,16 +1173,35 @@
                     body: JSON.stringify({ prompt, width, height, num_inference_steps: steps, negative_prompt: negPrompt, raw_mode: isRaw, model_id: modelId })
                 });
                 const data = await res.json();
-                consoleBox.textContent = `Engine: ${data.engine}\nModel: ${data.model_id || modelId} | Device: ${data.device || 'mps'} | Raw Mode: ${isRaw ? 'Active' : 'Disabled'}\n` + JSON.stringify(data.dimensions, null, 2);
-                if (data.placeholder) {
-                    consoleBox.textContent = `⚠️ PLACEHOLDER - no diffusion model loaded. This is a gradient, not a render.\n` + consoleBox.textContent;
+                // Report what the engine actually did, not what was requested:
+                // the step count can be clamped, the adapter can be refused, and
+                // the seed is what makes a render reproducible.
+                const lines = [
+                    `Engine: ${data.engine}`,
+                    `Model: ${data.model_id || modelId} | Device: ${data.device || 'mps'} | Precision: ${data.dtype || 'unknown'}`,
+                    `Steps: ${data.steps_used} used of ${data.steps_requested} requested`
+                        + (data.steps_used < data.steps_requested ? '  (clamped)' : ''),
+                    `Seed: ${data.seed}  (pass this seed to reproduce exactly)`,
+                    `Size: ${data.dimensions?.width}x${data.dimensions?.height} | Raw mode: ${isRaw ? 'Active' : 'Disabled'}`,
+                    `LoRA: ${data.lora || 'none'}`,
+                    `Time: ${data.inference_time_seconds}s`,
+                ];
+                if (data.lora_error) {
+                    lines.unshift(`⚠️ Adapter not applied: ${data.lora_error}`);
                 }
+                if (data.blank_image) {
+                    lines.unshift('⚠️ BLANK IMAGE - the render carries no detail. This is not a usable result.');
+                }
+                if (data.placeholder) {
+                    lines.unshift('⚠️ PLACEHOLDER - no diffusion model loaded. This is a gradient, not a render.');
+                }
+                consoleBox.textContent = lines.join('\n');
 
                 const imgSrc = data.base64 ? `data:image/png;base64,${data.base64}` : (data.relative_url ? `${API_BASE}${data.relative_url}` : '');
                 if (imgSrc) {
                     previewBox.innerHTML = `<img src="${imgSrc}" style="max-width:100%; max-height:480px; border-radius:0.75rem; border:2px solid var(--accent-pink); box-shadow:0 8px 32px rgba(236,72,153,0.4);" alt="Photorealistic Artwork">`;
                 } else {
-                    previewBox.innerHTML = '<div style="color:var(--warning);">Image synthesized cleanly, asset saved to static/videos.</div>';
+                    previewBox.innerHTML = '<div style="color:var(--warning);">No image data came back in the response. Check the console output above.</div>';
                 }
 
                 if (document.getElementById('autoTTSCheck')?.checked) {
@@ -1445,29 +1470,77 @@
             }
         }
 
-        async function streamGemma() {
+        // Shared with the chat page in spirit: one id per tab, so the console is a
+        // conversation rather than a series of unrelated one-shots.
+        const GEMMA_CONSOLE_CONVERSATION = (function () {
+            let id = sessionStorage.getItem('gemmaConsoleConversationId');
+            if (!id) {
+                id = 'console-' + Math.random().toString(36).slice(2, 10);
+                sessionStorage.setItem('gemmaConsoleConversationId', id);
+            }
+            return id;
+        })();
+
+        // Named streamGemma and now actually streams. It previously awaited the
+        // whole completion and printed it in one go.
+        function streamGemma() {
             const prompt = document.getElementById('gemmaPrompt').value;
             const consoleBox = document.getElementById('gemmaConsole');
-            consoleBox.textContent = 'Connecting to Gemma 2 reasoning engine...\n';
+            consoleBox.classList.remove('console-error');
+            consoleBox.textContent = '';
 
-            try {
-                const res = await fetch(`${API_BASE}/v1/chat/completions`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        model: 'gemma2:2b',
-                        messages: [{ role: 'user', content: prompt }]
-                    })
-                });
-                const data = await res.json();
-                const content = data.choices[0].message.content;
-                consoleBox.textContent = content;
-                if (document.getElementById('autoTTSCheck')?.checked) {
-                    speakText(content);
+            const url = `${API_BASE}/api/gemma/stream`
+                + `?prompt=${encodeURIComponent(prompt)}`
+                + `&conversation_id=${encodeURIComponent(GEMMA_CONSOLE_CONVERSATION)}`;
+
+            let text = '';
+            let failed = false;
+            const source = new EventSource(url);
+
+            source.onmessage = function (event) {
+                if (event.data === '[DONE]') {
+                    source.close();
+                    if (!failed && text && document.getElementById('autoTTSCheck')?.checked) {
+                        speakText(text);
+                    }
+                    return;
                 }
-            } catch (err) {
-                consoleBox.textContent = `Error: ${err.message}`;
-            }
+                let payload;
+                try {
+                    payload = JSON.parse(event.data);
+                } catch (e) {
+                    return;
+                }
+                if (payload.error) {
+                    failed = true;
+                    consoleBox.classList.add('console-error');
+                    consoleBox.textContent = `Gemma unavailable: ${payload.error}`;
+                    return;
+                }
+                text += payload.token || '';
+                consoleBox.textContent = text;
+                consoleBox.scrollTop = consoleBox.scrollHeight;
+            };
+
+            source.onerror = function () {
+                source.close();
+                if (!text && !failed) {
+                    consoleBox.classList.add('console-error');
+                    consoleBox.textContent = 'Lost connection to the Gemma stream.';
+                }
+            };
+        }
+
+        function resetGemmaConsole() {
+            fetch(`${API_BASE}/api/gemma`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ action: 'reset', conversation_id: GEMMA_CONSOLE_CONVERSATION })
+            }).then(() => {
+                const consoleBox = document.getElementById('gemmaConsole');
+                consoleBox.classList.remove('console-error');
+                consoleBox.textContent = 'Conversation cleared.';
+            });
         }
 
         async function runSelfOptimize() {
@@ -1482,7 +1555,11 @@
             const text = JSON.stringify(data, null, 2);
             consoleBox.textContent = text;
             if (document.getElementById('autoTTSCheck')?.checked) {
-                speakText(`Gemma Meta-Orchestrator optimization complete. System health is optimal.`);
+                // Say what came back. The previous line spoke "System health is
+                // optimal" unconditionally, including when the call had failed.
+                speakText(data.success === false
+                    ? `Optimization failed: ${data.error || 'unknown error'}`
+                    : 'Meta-Orchestrator optimization complete. See the console for the result.');
             }
         }
 

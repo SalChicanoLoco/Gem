@@ -66,9 +66,23 @@ class TestPrecisionAndSafetyChecker(unittest.TestCase):
     """
 
     def test_mps_defaults_to_half_precision(self):
-        engine = PyTorchDiffusionEngine()
+        engine = PyTorchDiffusionEngine(model_id="runwayml/stable-diffusion-v1-5")
         if engine.device == "mps":
             self.assertEqual(str(engine._inference_dtype()), "torch.float16")
+
+    def test_models_unstable_in_half_precision_stay_float32(self):
+        """
+        segmind/tiny-sd renders a solid frame on most seeds in float16 on MPS,
+        measured 2 of 3 against 0 of 3 in float32, so it opts out of the default.
+        """
+        engine = PyTorchDiffusionEngine(model_id="segmind/tiny-sd")
+        if engine.device == "mps":
+            self.assertEqual(str(engine._inference_dtype()), "torch.float32")
+
+    def test_explicit_dtype_overrides_the_unstable_list(self):
+        """The list is a default, not a restriction."""
+        engine = PyTorchDiffusionEngine(model_id="segmind/tiny-sd", dtype="float16")
+        self.assertEqual(str(engine._inference_dtype()), "torch.float16")
 
     def test_safety_checker_is_off_by_default(self):
         self.assertFalse(PyTorchDiffusionEngine().safety_checker)
