@@ -14,6 +14,50 @@ import requests
 
 logger = logging.getLogger(__name__)
 
+# How many messages of a conversation to keep. Two per exchange, so this is 30
+# turns; gemma2:2b has a small context and older turns fall out of it anyway.
+MAX_HISTORY_MESSAGES = 60
+
+
+class GemmaUnavailable(RuntimeError):
+    """
+    Raised when the local model cannot be reached.
+
+    This exists so callers cannot mistake a failure for an answer. The previous
+    behaviour was to return keyword-matched prose that read exactly like a real
+    response — including invented sensor readings — which made an offline model
+    indistinguishable from a working one.
+    """
+
+
+class ConversationStore:
+    """
+    In-memory chat history, keyed by conversation id.
+
+    Ollama's chat API is stateless: multi-turn context exists only if the caller
+    resends prior messages. Without this, every message was an isolated one-shot
+    and the model could not refer to anything said earlier.
+    """
+
+    def __init__(self, max_messages: int = MAX_HISTORY_MESSAGES):
+        self.max_messages = max_messages
+        self._conversations: Dict[str, List[Dict[str, str]]] = {}
+
+    def get(self, conversation_id: str) -> List[Dict[str, str]]:
+        return list(self._conversations.get(conversation_id, []))
+
+    def append(self, conversation_id: str, role: str, content: str) -> None:
+        history = self._conversations.setdefault(conversation_id, [])
+        history.append({"role": role, "content": content})
+        if len(history) > self.max_messages:
+            del history[: len(history) - self.max_messages]
+
+    def reset(self, conversation_id: str) -> None:
+        self._conversations.pop(conversation_id, None)
+
+    def ids(self) -> List[str]:
+        return list(self._conversations)
+
 
 class GemmaAgent:
     """
@@ -25,7 +69,7 @@ class GemmaAgent:
         self,
         model_name: str = "gemma2:2b",
         ollama_host: str = "http://localhost:11434",
-        timeout: int = 4,
+        timeout: int = 120,
     ):
         """
         Initialize GemmaAgent.
@@ -33,11 +77,14 @@ class GemmaAgent:
         Args:
             model_name: Name of the Gemma model (e.g. gemma2:2b, gemma2:9b, gemma3).
             ollama_host: Base URL for local Ollama server.
-            timeout: Request timeout in seconds (default 4s for fast fallback).
+            timeout: Request timeout in seconds. Generous on purpose: the old 4s
+                budget expired on any answer longer than a sentence, and the
+                timeout was then reported as a model response.
         """
         self.model_name = model_name
         self.ollama_host = ollama_host.rstrip("/")
         self.timeout = timeout
+        self.conversations = ConversationStore()
         self.system_prompt = (
             "You are Gemma, an advanced local AI reasoning engine running inside SenaAIgent Pre-AI OS. "
             "Your task is to analyze telemetry, optimize task queues, synthesize creative prompts, "
@@ -92,6 +139,9 @@ class GemmaAgent:
 
         Returns:
             Generated response string.
+
+        Raises:
+            GemmaUnavailable: if the local model cannot be reached or errors.
         """
         sys_msg = system or self.system_prompt
         try:
@@ -108,12 +158,138 @@ class GemmaAgent:
             resp = requests.post(url, json=payload, timeout=self.timeout)
             if resp.status_code == 200:
                 return resp.json().get("response", "").strip()
-            logger.warning(f"Ollama API returned status {resp.status_code}: {resp.text}")
+            raise GemmaUnavailable(
+                f"Ollama returned HTTP {resp.status_code} for model {self.model_name}: {resp.text[:200]}"
+            )
+        except GemmaUnavailable:
+            raise
         except Exception as e:
-            logger.warning(f"Local Gemma inference failed or timed out: {e}")
+            raise GemmaUnavailable(
+                f"Local Gemma inference failed against {self.ollama_host}: {e}. "
+                f"Start it with `ollama serve` and ensure `{self.model_name}` is pulled."
+            ) from e
 
-        # Fallback deterministic reasoning if Ollama server is offline
-        return self._fallback_reasoning(prompt)
+    def chat(
+        self,
+        message: str,
+        conversation_id: str = "default",
+        system: Optional[str] = None,
+        temperature: float = 0.7,
+    ) -> Dict[str, Any]:
+        """
+        Hold a multi-turn conversation, carrying prior turns as context.
+
+        Uses Ollama's /api/chat with the accumulated message list, which is what
+        makes a follow-up like "and why?" resolvable. The user message is recorded
+        before the call and the reply after, so a failed turn does not leave a
+        dangling prompt in the history.
+
+        Raises:
+            GemmaUnavailable: if the local model cannot be reached.
+        """
+        history = self.conversations.get(conversation_id)
+        messages = [{"role": "system", "content": system or self.system_prompt}]
+        messages.extend(history)
+        messages.append({"role": "user", "content": message})
+
+        try:
+            resp = requests.post(
+                f"{self.ollama_host}/api/chat",
+                json={
+                    "model": self.model_name,
+                    "messages": messages,
+                    "stream": False,
+                    "options": {"temperature": temperature},
+                },
+                timeout=self.timeout,
+            )
+            if resp.status_code != 200:
+                raise GemmaUnavailable(
+                    f"Ollama returned HTTP {resp.status_code} for model {self.model_name}: {resp.text[:200]}"
+                )
+            reply = (resp.json().get("message") or {}).get("content", "").strip()
+        except GemmaUnavailable:
+            raise
+        except Exception as e:
+            raise GemmaUnavailable(
+                f"Local Gemma chat failed against {self.ollama_host}: {e}. "
+                f"Start it with `ollama serve` and ensure `{self.model_name}` is pulled."
+            ) from e
+
+        self.conversations.append(conversation_id, "user", message)
+        self.conversations.append(conversation_id, "assistant", reply)
+        return {
+            "success": True,
+            "model": self.model_name,
+            "conversation_id": conversation_id,
+            "message": message,
+            "response": reply,
+            "turns": len(self.conversations.get(conversation_id)) // 2,
+        }
+
+    def chat_stream(
+        self,
+        message: str,
+        conversation_id: str = "default",
+        system: Optional[str] = None,
+        temperature: float = 0.7,
+    ):
+        """
+        Stream a conversational reply token by token as the model produces it.
+
+        Yields text chunks. The previous streaming endpoint generated the whole
+        answer first and then released it word by word on a timer, which looked
+        live but was not; nothing reached the client any sooner.
+
+        Raises:
+            GemmaUnavailable: if the local model cannot be reached.
+        """
+        history = self.conversations.get(conversation_id)
+        messages = [{"role": "system", "content": system or self.system_prompt}]
+        messages.extend(history)
+        messages.append({"role": "user", "content": message})
+
+        try:
+            resp = requests.post(
+                f"{self.ollama_host}/api/chat",
+                json={
+                    "model": self.model_name,
+                    "messages": messages,
+                    "stream": True,
+                    "options": {"temperature": temperature},
+                },
+                timeout=self.timeout,
+                stream=True,
+            )
+            if resp.status_code != 200:
+                raise GemmaUnavailable(
+                    f"Ollama returned HTTP {resp.status_code} for model {self.model_name}"
+                )
+        except GemmaUnavailable:
+            raise
+        except Exception as e:
+            raise GemmaUnavailable(
+                f"Local Gemma chat stream failed against {self.ollama_host}: {e}. "
+                f"Start it with `ollama serve` and ensure `{self.model_name}` is pulled."
+            ) from e
+
+        parts: List[str] = []
+        for line in resp.iter_lines():
+            if not line:
+                continue
+            try:
+                chunk = json.loads(line)
+            except ValueError:
+                continue
+            piece = (chunk.get("message") or {}).get("content", "")
+            if piece:
+                parts.append(piece)
+                yield piece
+            if chunk.get("done"):
+                break
+
+        self.conversations.append(conversation_id, "user", message)
+        self.conversations.append(conversation_id, "assistant", "".join(parts))
 
     def analyze_telemetry(self, telemetry_data: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -132,7 +308,11 @@ class GemmaAgent:
             f"and 'actionable_steps' (list of strings)."
         )
 
-        response = self.generate(prompt, temperature=0.3)
+        try:
+            response = self.generate(prompt, temperature=0.3)
+        except GemmaUnavailable as e:
+            return {"success": False, "llm_engine": "Gemma Local", "error": str(e)}
+
         parsed = self._extract_json(response)
 
         if parsed and "assessment" in parsed:
@@ -143,14 +323,16 @@ class GemmaAgent:
                 "raw_response": response,
             }
 
-        # Fallback structured output
+        # The model answered but not as JSON. Hand back what it said; do not
+        # invent a risk level it never assessed.
         return {
             "success": True,
-            "llm_engine": "Gemma Local (Fallback Heuristic)",
+            "llm_engine": "Gemma Local",
+            "parsed": False,
             "analysis": {
-                "assessment": response[:200] if response else "Telemetry within normal parameters.",
-                "risk_level": "LOW",
-                "actionable_steps": ["Maintain standard sampling frequency"],
+                "assessment": response[:500],
+                "risk_level": None,
+                "actionable_steps": [],
             },
             "raw_response": response,
         }
@@ -179,7 +361,11 @@ class GemmaAgent:
             f"- 'rationale': string\n"
         )
 
-        response = self.generate(prompt, temperature=0.2)
+        try:
+            response = self.generate(prompt, temperature=0.2)
+        except GemmaUnavailable as e:
+            return {"success": False, "optimizer": "Gemma Autonomous Meta-Orchestrator", "error": str(e)}
+
         parsed = self._extract_json(response)
 
         if parsed and "rationale" in parsed:
@@ -189,15 +375,19 @@ class GemmaAgent:
                 "recommendations": parsed,
             }
 
+        # Arithmetic on the metrics we were handed is a real derivation; the
+        # rationale is labelled as such rather than attributed to the model.
         return {
             "success": True,
-            "optimizer": "Gemma Autonomous Meta-Orchestrator",
+            "optimizer": "Threshold heuristic (model reply was not JSON)",
+            "parsed": False,
             "recommendations": {
                 "bottleneck_detected": load_metrics.get("load_score", 0) > 80,
                 "recommended_worker_threads": min(8, max(2, load_metrics.get("queue_length", 1) + 2)),
                 "priority_reassignments": {},
-                "rationale": "System operating smoothly. Worker threads auto-scaled to balance queue load.",
+                "rationale": "Derived from load_score and queue_length thresholds, not from the model.",
             },
+            "raw_response": response,
         }
 
     def synthesize_aesthetic_prompt(self, base_concept: str, style: str) -> str:
@@ -218,7 +408,13 @@ class GemmaAgent:
             f"Write only the final enhanced prompt description without preamble."
         )
 
-        enhanced = self.generate(prompt, temperature=0.8)
+        try:
+            enhanced = self.generate(prompt, temperature=0.8)
+        except GemmaUnavailable:
+            # A template is a legitimate answer here, unlike an invented one; the
+            # caller gets a usable prompt and the log says it was not synthesized.
+            logger.warning("Gemma unavailable; using template prompt for %r.", base_concept)
+            return f"A vibrant {style} masterpiece of {base_concept}, ultra-detailed, 8k"
         return enhanced if len(enhanced) > 10 else f"A vibrant {style} masterpiece of {base_concept}, ultra-detailed, 8k"
 
     @staticmethod
@@ -233,71 +429,3 @@ class GemmaAgent:
         except Exception:
             return None
 
-    @staticmethod
-    def _fallback_reasoning(prompt: str) -> str:
-        """Dynamic contextual reasoning engine tailored to user prompt intent."""
-        p_lower = prompt.lower().strip()
-
-        if "hello" in p_lower or "hi" in p_lower or "hey" in p_lower or "greetings" in p_lower:
-            return "Hello! I am Gemma, your local AI assistant running on Apple Silicon. How can I assist your workflow today?"
-
-        if "pytorch" in p_lower or "mps" in p_lower or "gpu" in p_lower or "metal" in p_lower or "memory" in p_lower:
-            return (
-                "Apple Silicon MPS (Metal Performance Shaders) uses unified memory shared dynamically between the CPU and GPU cores. "
-                "PyTorch allocates Metal command buffers directly within unified LPDDR RAM. "
-                "To prevent memory fragmentation, use torch.mps.empty_cache() and enable attention slicing for diffusion models."
-            )
-
-        if "quantum" in p_lower:
-            return (
-                "Quantum computing uses quantum bits or qubits that exist in superposition and entanglement. "
-                "This allows quantum algorithms like Shor's and Grover's to evaluate vast solution spaces exponentially faster than classical bits."
-            )
-
-        if "water" in p_lower or "telemetry" in p_lower:
-            return (
-                "Water Telemetry Analysis: Baseline pH is 7.2 (neutral range), Turbidity is 1.8 NTU (clear), "
-                "and Dissolved Oxygen is 7.8 mg/L. Overall risk level is LOW with all environmental sensors reporting nominal parameters."
-            )
-
-        if "optimize" in p_lower or "queue" in p_lower or "spine" in p_lower:
-            return (
-                "Autonomous Orchestrator Status: Worker thread pool is running with strict sequential barrier synchronization. "
-                "Task queue pressure is optimal at 0% with 100% throughput across all registered local agent modules."
-            )
-
-        if "voice" in p_lower or "vocal" in p_lower or "audio" in p_lower or "speech" in p_lower:
-            return (
-                "SenaVocalEngine is active! Speech Recognition dictation receives your microphone input in real-time, "
-                "and Speech Synthesis automatically speaks responses aloud."
-            )
-
-        if "image" in p_lower or "picture" in p_lower or "photo" in p_lower or "render" in p_lower:
-            return (
-                "Photorealistic Diffusion Engine is ready! Enter descriptive lighting parameters such as 'RAW photo, 35mm lens, volumetric sunlight' "
-                "for hardware-accelerated synthesis on Apple Silicon."
-            )
-
-        if "code" in p_lower or "python" in p_lower or "function" in p_lower or "script" in p_lower or "sort" in p_lower:
-            return (
-                "Here is a clean Python routine for your task:\n\n"
-                "```python\n"
-                "def process_data(payload: dict) -> dict:\n"
-                "    \"\"\"Process and transform task payload with sorted keys.\"\"\"\n"
-                "    sorted_items = sorted(payload.items(), key=lambda x: str(x[0]))\n"
-                "    return {\n"
-                "        'status': 'success',\n"
-                "        'processed_count': len(sorted_items),\n"
-                "        'data': dict(sorted_items)\n"
-                "    }\n"
-                "```"
-            )
-
-        # Dynamic fallback for general queries
-        words = [w for w in prompt.split() if len(w) > 3]
-        topic = ", ".join(words[:4]) if words else "your prompt"
-        return (
-            f"Here is the local Gemma analysis for '{prompt}':\n\n"
-            f"Focusing on {topic}, our local Apple Silicon reasoning engine evaluated the core context. "
-            f"The request has been processed across the agent spine, and all parameters are verified and operational."
-        )

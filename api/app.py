@@ -3,6 +3,7 @@ SenaAIgent API - Flask application with endpoints for ML analytics, image genera
 aesthetic analysis, and agent orchestration.
 """
 
+import json
 import os
 import time
 from flask import Flask, jsonify, request, send_from_directory, Response, stream_with_context, make_response
@@ -12,6 +13,7 @@ from agents import (
     ImageAgent,
     ArtAgent,
     GemmaAgent,
+    GemmaUnavailable,
     VideoAgent,
     CoderAgent,
     AutoHealer,
@@ -139,6 +141,30 @@ def create_app():
                     "response": response,
                 })
 
+            elif action == "chat":
+                message = data.get("message") or data.get("prompt", "")
+                if not message.strip():
+                    return jsonify({"success": False, "error": "message is required"}), 400
+                return jsonify(gemma_agent.chat(
+                    message,
+                    conversation_id=data.get("conversation_id", "default"),
+                    system=data.get("system"),
+                    temperature=data.get("temperature", 0.7),
+                ))
+
+            elif action == "history":
+                cid = data.get("conversation_id", "default")
+                return jsonify({
+                    "success": True,
+                    "conversation_id": cid,
+                    "messages": gemma_agent.conversations.get(cid),
+                })
+
+            elif action == "reset":
+                cid = data.get("conversation_id", "default")
+                gemma_agent.conversations.reset(cid)
+                return jsonify({"success": True, "conversation_id": cid, "messages": []})
+
             elif action == "analyze_telemetry":
                 telemetry = data.get("telemetry", {})
                 result = gemma_agent.analyze_telemetry(telemetry)
@@ -162,14 +188,19 @@ def create_app():
         Live SSE Text Streaming Endpoint.
         Streams Gemma token responses word-by-word via Server-Sent Events.
         """
-        prompt = request.args.get("prompt") or (request.get_json() or {}).get("prompt", "Hello Gemma")
+        body = request.get_json(silent=True) or {}
+        prompt = request.args.get("prompt") or body.get("message") or body.get("prompt", "Hello Gemma")
+        conversation_id = request.args.get("conversation_id") or body.get("conversation_id", "default")
 
         def generate_sse():
-            full_response = gemma_agent.generate(prompt)
-            words = full_response.split(" ")
-            for word in words:
-                yield f"data: {word} \n\n"
-                time.sleep(0.04)
+            # Chunks are forwarded as the model emits them. Payloads are JSON so a
+            # token containing a newline cannot truncate the SSE frame, and so an
+            # error can be delivered as an error instead of as chat text.
+            try:
+                for piece in gemma_agent.chat_stream(prompt, conversation_id=conversation_id):
+                    yield f"data: {json.dumps({'token': piece})}\n\n"
+            except GemmaUnavailable as e:
+                yield f"data: {json.dumps({'error': str(e)})}\n\n"
             yield "data: [DONE]\n\n"
 
         return Response(stream_with_context(generate_sse()), content_type="text/event-stream")

@@ -4,7 +4,7 @@ Tests for GemmaAgent class and Gemma API endpoints.
 
 import pytest
 from unittest.mock import patch, MagicMock
-from agents.gemma_agent import GemmaAgent
+from agents.gemma_agent import ConversationStore, GemmaAgent, GemmaUnavailable
 
 
 @pytest.fixture
@@ -20,7 +20,7 @@ class TestGemmaAgentInit:
         """Test default initialization."""
         assert gemma.model_name == "gemma2:2b"
         assert gemma.ollama_host == "http://localhost:11434"
-        assert gemma.timeout == 4
+        assert gemma.timeout == 120
 
     def test_get_status(self, gemma):
         """Test status dictionary output."""
@@ -37,13 +37,26 @@ class TestGemmaAgentInit:
 class TestGemmaInferenceAndFallback:
     """Tests for Gemma inference generation and fallbacks."""
 
-    def test_generate_fallback(self, gemma):
-        """Test text generation fallback when server offline."""
+    def test_generate_raises_when_offline(self, gemma):
+        """
+        An unreachable model must not be answered for.
+
+        This previously returned keyword-matched prose — for a telemetry prompt,
+        invented pH and turbidity readings — which a caller could not tell from a
+        real answer.
+        """
         with patch("requests.post") as mock_post:
             mock_post.side_effect = Exception("Offline")
-            res = gemma.generate("Analyze water telemetry quality")
-            assert isinstance(res, str)
-            assert len(res) > 0
+            with pytest.raises(GemmaUnavailable):
+                gemma.generate("Analyze water telemetry quality")
+
+    def test_offline_telemetry_reports_failure_rather_than_inventing_readings(self, gemma):
+        with patch("requests.post") as mock_post:
+            mock_post.side_effect = Exception("Offline")
+            result = gemma.analyze_telemetry({"ph": 7.4})
+        assert result["success"] is False
+        assert "error" in result
+        assert "analysis" not in result
 
     def test_analyze_telemetry(self, gemma):
         """Test telemetry analysis wrapper."""
@@ -66,6 +79,44 @@ class TestGemmaInferenceAndFallback:
             assert res["success"] is True
             assert "recommendations" in res
 
+    def test_chat_sends_prior_turns_as_context(self, gemma):
+        """
+        The point of a conversation is that turn two can refer to turn one, which
+        only works if earlier messages are resent. Ollama's API is stateless.
+        """
+        with patch("requests.post") as mock_post:
+            mock_post.return_value.status_code = 200
+            mock_post.return_value.json.return_value = {"message": {"content": "Noted."}}
+            gemma.chat("my adapter is sena_style", conversation_id="c1")
+            gemma.chat("what is it called?", conversation_id="c1")
+
+            sent = mock_post.call_args.kwargs["json"]["messages"]
+
+        roles = [m["role"] for m in sent]
+        assert roles == ["system", "user", "assistant", "user"]
+        assert sent[1]["content"] == "my adapter is sena_style"
+        assert sent[-1]["content"] == "what is it called?"
+
+    def test_conversations_are_isolated(self, gemma):
+        with patch("requests.post") as mock_post:
+            mock_post.return_value.status_code = 200
+            mock_post.return_value.json.return_value = {"message": {"content": "ok"}}
+            gemma.chat("first", conversation_id="a")
+            gemma.chat("second", conversation_id="b")
+
+        assert len(gemma.conversations.get("a")) == 2
+        assert gemma.conversations.get("a")[0]["content"] == "first"
+        assert gemma.conversations.get("b")[0]["content"] == "second"
+
+    def test_failed_turn_leaves_no_dangling_history(self, gemma):
+        """A turn that never got an answer must not pollute later context."""
+        with patch("requests.post") as mock_post:
+            mock_post.side_effect = Exception("Offline")
+            with pytest.raises(GemmaUnavailable):
+                gemma.chat("hello", conversation_id="c2")
+
+        assert gemma.conversations.get("c2") == []
+
     def test_synthesize_aesthetic_prompt(self, gemma):
         """Test aesthetic prompt synthesis."""
         with patch("requests.post") as mock_post:
@@ -74,3 +125,38 @@ class TestGemmaInferenceAndFallback:
             prompt = gemma.synthesize_aesthetic_prompt("mountain lake", "impressionist")
             assert isinstance(prompt, str)
             assert len(prompt) > 0
+
+
+class TestConversationStore:
+    """History is capped so a long session cannot grow without bound."""
+
+    def test_append_and_get(self):
+        store = ConversationStore()
+        store.append("c", "user", "hi")
+        store.append("c", "assistant", "hello")
+        assert [m["role"] for m in store.get("c")] == ["user", "assistant"]
+
+    def test_unknown_conversation_is_empty(self):
+        assert ConversationStore().get("nope") == []
+
+    def test_oldest_messages_are_dropped_at_the_cap(self):
+        store = ConversationStore(max_messages=4)
+        for i in range(6):
+            store.append("c", "user", f"m{i}")
+        kept = [m["content"] for m in store.get("c")]
+        assert kept == ["m2", "m3", "m4", "m5"]
+
+    def test_reset_clears_only_that_conversation(self):
+        store = ConversationStore()
+        store.append("a", "user", "x")
+        store.append("b", "user", "y")
+        store.reset("a")
+        assert store.get("a") == []
+        assert len(store.get("b")) == 1
+
+    def test_returned_history_is_a_copy(self):
+        """A caller mutating the returned list must not corrupt stored history."""
+        store = ConversationStore()
+        store.append("c", "user", "x")
+        store.get("c").append({"role": "user", "content": "injected"})
+        assert len(store.get("c")) == 1

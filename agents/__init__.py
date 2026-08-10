@@ -42,7 +42,7 @@ See agents/parallel.py for detailed parallel architecture documentation.
 from .model_agent import ModelAgent
 from .image_agent import ImageAgent
 from .art_agent import ArtAgent
-from .gemma_agent import GemmaAgent
+from .gemma_agent import ConversationStore, GemmaAgent, GemmaUnavailable
 from .spine import MasterSpineCoordinator, get_spine
 from .video_agent import VideoAgent
 from .coder_agent import CoderAgent
@@ -71,6 +71,8 @@ __all__ = [
     "ImageAgent",
     "ArtAgent",
     "GemmaAgent",
+    "GemmaUnavailable",
+    "ConversationStore",
     "MasterSpineCoordinator",
     "get_spine",
     "VideoAgent",
