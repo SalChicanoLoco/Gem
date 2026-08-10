@@ -6,6 +6,10 @@ import pytest
 from unittest.mock import patch, MagicMock
 from agents.gemma_agent import ConversationStore, GemmaAgent, GemmaUnavailable
 
+# This module tests GemmaAgent itself, so it needs the real methods rather than
+# the offline stub conftest installs for everyone else.
+pytestmark = pytest.mark.real_gemma
+
 
 @pytest.fixture
 def gemma():
