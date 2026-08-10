@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "senaaigent-api",
+      "runtimeExecutable": "sh",
+      "runtimeArgs": ["-c", "PORT=5005 ./venv/bin/python start_api.py"],
+      "port": 5005
+    }
+  ]
+}
