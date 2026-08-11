@@ -90,3 +90,7 @@ config/edge_optimization.json
 # Tools written at runtime by the evolution engine
 extensions/*.py
 !extensions/__init__.py
+
+# Everything the acquisition agent downloads lands here first and is promoted
+# out explicitly. Never tracked: it is other people's bytes.
+downloads/

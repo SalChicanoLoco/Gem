@@ -8,7 +8,7 @@ import os
 import time
 from flask import Flask, jsonify, request, send_from_directory, Response, stream_with_context, make_response
 
-from agents import runtime_load
+from agents import runtime_load, sandbox, web_acquire
 from agents import (
     ModelAgent,
     ImageAgent,
@@ -1099,6 +1099,68 @@ def create_app():
                 training_dir=training_dir, max_steps=max_steps, learning_rate=lr
             )
             return jsonify(res)
+        except Exception as e:
+            return jsonify({"success": False, "error": str(e)}), 500
+
+    @app.route("/api/acquire", methods=["GET", "POST"])
+    def acquire_api():
+        """
+        Experimental: fetch openly-licensed photos and open-source model weights.
+
+        Downloads run in a subprocess confined to downloads/quarantine, fetch data
+        rather than code, and are never loaded or executed here. Moving anything
+        out of quarantine is a separate, explicit `promote` call.
+        """
+        if request.method == "GET":
+            return jsonify({
+                "endpoint": "/api/acquire",
+                "status": "experimental",
+                "sandbox_available": sandbox.available(),
+                "actions": {
+                    "search_images": "Search Wikimedia Commons; downloads nothing",
+                    "download_images": "Download licensed photos into quarantine",
+                    "search_models": "Search the Hugging Face Hub; downloads nothing",
+                    "inspect_model": "List a repo's files and sizes before fetching",
+                    "download_model": "Download weights into quarantine (safetensors by default)",
+                    "list_quarantine": "What is currently quarantined",
+                    "promote": "Move a vetted download out of quarantine",
+                },
+            })
+
+        try:
+            data = request.get_json() or {}
+            action = data.get("action", "")
+
+            if action == "search_images":
+                return jsonify(web_acquire.search_images(data.get("query", ""), data.get("limit", 10)))
+            if action == "download_images":
+                with runtime_load.track("download"):
+                    return jsonify(web_acquire.download_images(
+                        subject=data.get("subject", ""),
+                        query=data.get("query", ""),
+                        limit=data.get("limit", 20),
+                        caption=data.get("caption"),
+                    ))
+            if action == "search_models":
+                return jsonify(web_acquire.search_models(data.get("query", ""), data.get("limit", 10)))
+            if action == "inspect_model":
+                return jsonify(web_acquire.inspect_model(data.get("repo_id", "")))
+            if action == "download_model":
+                with runtime_load.track("download"):
+                    return jsonify(web_acquire.download_model(
+                        repo_id=data.get("repo_id", ""),
+                        allow_unsafe=bool(data.get("allow_unsafe", False)),
+                        max_gb=float(data.get("max_gb", web_acquire.DEFAULT_MAX_MODEL_GB)),
+                    ))
+            if action == "list_quarantine":
+                return jsonify(web_acquire.list_quarantine())
+            if action == "promote":
+                return jsonify(web_acquire.promote(
+                    data.get("relative_path", ""),
+                    data.get("destination_root", "checkpoints"),
+                ))
+
+            return jsonify({"success": False, "error": f"Unknown action: {action!r}"}), 400
         except Exception as e:
             return jsonify({"success": False, "error": str(e)}), 500
 
