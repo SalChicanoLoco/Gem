@@ -8,7 +8,8 @@ import os
 import time
 from flask import Flask, jsonify, request, send_from_directory, Response, stream_with_context, make_response
 
-from agents import runtime_load, sandbox, web_acquire
+from agents import render_estimator, runtime_load, sandbox, web_acquire
+from agents import video_agent as video_agent_module
 from agents import (
     ModelAgent,
     ImageAgent,
@@ -239,6 +240,27 @@ def create_app():
             num_frames = int(data.get("num_frames", 16))
             fps = int(data.get("fps", 8))
             style = data.get("style", "quetzal_diffusion")
+            duration_seconds = data.get("duration_seconds")
+
+            # action=estimate answers "how long will this take" without rendering,
+            # from measurements of previous runs on this machine.
+            if data.get("action") == "estimate":
+                frames = (max(1, int(round(float(duration_seconds) * fps)))
+                          if duration_seconds else num_frames)
+                engine_key = ("svd" if style in video_agent_module.SVD_STYLES
+                              or os.environ.get("USE_PYTORCH_VIDEO") == "true" else "procedural")
+                clamped = min(frames, video_agent_module.SVD_MAX_FRAMES) if engine_key == "svd" else frames
+                estimate = render_estimator.estimate(engine_key, width, height, clamped)
+                return jsonify({
+                    "success": True,
+                    "engine": engine_key,
+                    "frames_requested": frames,
+                    "frames_used": clamped,
+                    "frames_clamped": clamped != frames,
+                    "fps": fps,
+                    "clip_seconds": round(clamped / max(1, fps), 2),
+                    **estimate,
+                })
 
             result = video_agent.create_clip(
                 prompt=prompt,
@@ -247,6 +269,7 @@ def create_app():
                 num_frames=num_frames,
                 fps=fps,
                 style=style,
+                duration_seconds=float(duration_seconds) if duration_seconds else None,
             )
             return jsonify(result)
 

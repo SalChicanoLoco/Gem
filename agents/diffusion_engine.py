@@ -28,12 +28,24 @@ logger = logging.getLogger(__name__)
 # (~16s at 512x768). The budget is unchanged; the precision bought the steps.
 MAX_INFERENCE_STEPS = int(os.environ.get("MAX_INFERENCE_STEPS", "50"))
 
-# Models that render blank frames in half precision on MPS and so default to
-# float32 despite the speed cost. segmind/tiny-sd is distilled and its activations
-# evidently leave float16 range: measured at 512x512, 20 steps, it produced a solid
-# frame on 2 of 3 seeds in float16 and on 0 of 3 in float32, while SD 1.5 was clean
-# on every seed in both. An explicit dtype= or $DIFFUSION_DTYPE still overrides.
+# Models that render blank frames in half precision on MPS at any size, and so
+# default to float32 despite the speed cost. segmind/tiny-sd is distilled and its
+# activations evidently leave float16 range: measured at 512x512, 20 steps, it
+# produced a solid frame on 2 of 3 seeds in float16 and on 0 of 3 in float32,
+# where SD 1.5 was clean on every seed at that size.
+#
+# Size matters separately — see FP16_MIN_DIMENSION. SD 1.5 is not on this list
+# because it is fine in float16 from 384px up, but it does blank at 256px.
+# An explicit dtype= or $DIFFUSION_DTYPE still overrides both rules.
 FP16_UNSTABLE_ON_MPS = frozenset({"segmind/tiny-sd"})
+
+# Half precision also fails below a certain size, independently of the model.
+# Measured on SD 1.5 at 15 steps, seed 11: 256x256 renders a solid frame in
+# float16 and a correct one in float32, while 384x384 and 512x512 are clean in
+# both. Small latents evidently leave too little numerical headroom. Anything
+# under this on either axis falls back to float32, which costs little because
+# small renders are fast anyway.
+FP16_MIN_DIMENSION = 384
 
 MINIMAL_NEGATIVE_PROMPT = "blurry, lowres, distorted"
 
@@ -137,7 +149,7 @@ class PyTorchDiffusionEngine:
         self.lora_error: Optional[str] = None
         logger.info(f"PyTorchDiffusionEngine configured with device: {self.device}")
 
-    def _inference_dtype(self):
+    def _inference_dtype(self, width: Optional[int] = None, height: Optional[int] = None):
         """
         Precision for inference.
 
@@ -159,6 +171,8 @@ class PyTorchDiffusionEngine:
         if self.device != "mps":
             return torch.float32
         if self.model_id in FP16_UNSTABLE_ON_MPS:
+            return torch.float32
+        if width is not None and height is not None and min(width, height) < FP16_MIN_DIMENSION:
             return torch.float32
         return torch.float16
 
@@ -212,7 +226,11 @@ class PyTorchDiffusionEngine:
         }
 
     def initialize_pipeline(
-        self, target_model: Optional[str] = None, target_lora: Optional[str] = None
+        self,
+        target_model: Optional[str] = None,
+        target_lora: Optional[str] = None,
+        width: Optional[int] = None,
+        height: Optional[int] = None,
     ) -> bool:
         """
         Lazy initialization of the diffusion model pipeline.
@@ -221,6 +239,9 @@ class PyTorchDiffusionEngine:
             target_model: Load this model instead of the configured one.
             target_lora: Apply this LoRA adapter directory instead of the
                 configured one. Changing either forces a reload.
+            width, height: Requested output size. Precision depends on it (see
+                FP16_MIN_DIMENSION), so a size needing different precision than
+                the loaded pipeline forces a reload.
         """
         if target_lora is not None and target_lora != self.lora_path:
             self.lora_path = target_lora
@@ -233,6 +254,15 @@ class PyTorchDiffusionEngine:
             self.initialized = False
             self.pipe = None
 
+        required_dtype = self._inference_dtype(width, height)
+        if self.initialized and getattr(self, "active_dtype", None) != required_dtype:
+            logger.info("Reloading pipeline: %s needs %s, loaded as %s.",
+                        f"{width}x{height}" if width else "request",
+                        str(required_dtype).replace("torch.", ""),
+                        str(getattr(self, "active_dtype", None)).replace("torch.", ""))
+            self.initialized = False
+            self.pipe = None
+
         if self.initialized and self.pipe is not None:
             return True
 
@@ -241,7 +271,8 @@ class PyTorchDiffusionEngine:
             return False
 
         try:
-            dtype = self._inference_dtype()
+            dtype = required_dtype
+            self.active_dtype = dtype
             logger.info(
                 "Loading diffusion pipeline %s on %s (%s, safety_checker=%s)...",
                 self.model_id, self.device, str(dtype).replace("torch.", ""),
@@ -368,7 +399,7 @@ class PyTorchDiffusionEngine:
             final_prompt = " ".join(words[:55])
 
         # Attempt hardware-accelerated generation if available
-        if self.initialize_pipeline(model_id, lora_path):
+        if self.initialize_pipeline(model_id, lora_path, width=width, height=height):
             try:
                 if self.device == "mps" and hasattr(torch, "mps") and hasattr(torch.mps, "empty_cache"):
                     try: torch.mps.empty_cache()
@@ -430,7 +461,7 @@ class PyTorchDiffusionEngine:
                     "engine": "PyTorch MPS (Apple Silicon Metal GPU)",
                     "device": self.device,
                     "model_id": self.model_id,
-                    "dtype": str(self._inference_dtype()).replace("torch.", ""),
+                    "dtype": str(self.active_dtype).replace("torch.", ""),
                     "safety_checker": self.safety_checker,
                     "blank_image": blank,
                     "lora": self.active_lora,

@@ -84,6 +84,31 @@ class TestPrecisionAndSafetyChecker(unittest.TestCase):
         engine = PyTorchDiffusionEngine(model_id="segmind/tiny-sd", dtype="float16")
         self.assertEqual(str(engine._inference_dtype()), "torch.float16")
 
+    def test_small_renders_drop_to_float32(self):
+        """
+        Half precision blanks below roughly 384px regardless of model: SD 1.5 at
+        256x256, 15 steps, seed 11 renders a solid frame in float16 and a correct
+        one in float32.
+        """
+        engine = PyTorchDiffusionEngine(model_id="runwayml/stable-diffusion-v1-5")
+        if engine.device == "mps":
+            self.assertEqual(str(engine._inference_dtype(256, 256)), "torch.float32")
+
+    def test_large_renders_keep_half_precision(self):
+        engine = PyTorchDiffusionEngine(model_id="runwayml/stable-diffusion-v1-5")
+        if engine.device == "mps":
+            self.assertEqual(str(engine._inference_dtype(512, 512)), "torch.float16")
+
+    def test_the_smaller_edge_decides(self):
+        """A wide, short frame is as numerically thin as a small square one."""
+        engine = PyTorchDiffusionEngine(model_id="runwayml/stable-diffusion-v1-5")
+        if engine.device == "mps":
+            self.assertEqual(str(engine._inference_dtype(1024, 256)), "torch.float32")
+
+    def test_explicit_dtype_overrides_the_size_rule(self):
+        engine = PyTorchDiffusionEngine(model_id="runwayml/stable-diffusion-v1-5", dtype="float16")
+        self.assertEqual(str(engine._inference_dtype(256, 256)), "torch.float16")
+
     def test_safety_checker_is_off_by_default(self):
         self.assertFalse(PyTorchDiffusionEngine().safety_checker)
 

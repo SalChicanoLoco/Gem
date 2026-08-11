@@ -6,6 +6,7 @@ AI-powered video clip generator supporting PyTorch Apple Silicon MPS video diffu
 """
 
 import io
+import logging
 import math
 import os
 import time
@@ -15,6 +16,15 @@ from PIL import Image, ImageDraw, ImageFont, ImageFilter
 from .gemma_agent import GemmaAgent
 from .spine import get_spine
 from .diffusion_engine import PyTorchDiffusionEngine, TORCH_AVAILABLE, MPS_AVAILABLE, DIFFUSERS_AVAILABLE
+from . import render_estimator
+
+# Styles routed to the Stable Video Diffusion pipeline rather than the procedural
+# fallback. SVD-xt is trained to emit a fixed short window, so a longer request is
+# clamped and reported instead of silently producing something else.
+SVD_STYLES = ("pytorch_svd", "wan2.1", "animatediff", "sota_diffusion")
+SVD_MAX_FRAMES = 25
+
+logger = logging.getLogger(__name__)
 
 # Check PyTorch Video Diffusion availability
 VIDEO_DIFFUSION_AVAILABLE = False
@@ -49,7 +59,9 @@ class PyTorchVideoDiffusionEngine:
             return False
 
         try:
-            dtype = torch.float32  # Use float32 on MPS for stability
+            dtype = self.inference_dtype()
+            logger.info("Loading video pipeline %s on %s (%s)...",
+                        self.model_id, self.device, str(dtype).replace("torch.", ""))
             self.pipe = StableVideoDiffusionPipeline.from_pretrained(
                 self.model_id,
                 torch_dtype=dtype,
@@ -57,8 +69,29 @@ class PyTorchVideoDiffusionEngine:
             self.pipe.to(self.device)
             self.initialized = True
             return True
-        except Exception:
+        except Exception as e:
+            logger.error("Video pipeline failed to load: %s", e)
             return False
+
+    def inference_dtype(self):
+        """
+        Precision for video denoising.
+
+        Was pinned to float32 "for stability". Half precision is the standard
+        configuration for Stable Video Diffusion and video is memory-bandwidth
+        bound, so this is the largest lever available on this hardware: the image
+        engine halved its per-step cost with the same change. Overridable with
+        $VIDEO_DTYPE, and the choice is reported on every clip so a bad render can
+        be attributed rather than guessed at.
+        """
+        named = {"float16": torch.float16, "bfloat16": torch.bfloat16, "float32": torch.float32}
+        override = os.environ.get("VIDEO_DTYPE")
+        if override:
+            chosen = named.get(override.lower())
+            if chosen is not None:
+                return chosen
+            logger.warning("Unknown VIDEO_DTYPE %r; using the default.", override)
+        return torch.float16 if self.device == "mps" else torch.float32
 
     def generate_video_diffusion(
         self,
@@ -131,6 +164,7 @@ class VideoAgent:
         num_frames: int = 16,
         fps: int = 8,
         style: str = "quetzal_diffusion",
+        duration_seconds: Optional[float] = None,
     ) -> Dict[str, Any]:
         """
         Create a video clip using PyTorch SVD or Quetzal Engine.
@@ -139,13 +173,39 @@ class VideoAgent:
             prompt: Text description for the video clip.
             width: Frame width.
             height: Frame height.
-            num_frames: Total number of frames in clip.
+            num_frames: Total number of frames in clip. Ignored when
+                duration_seconds is given.
             fps: Frames per second.
             style: Diffusion style (quetzal_diffusion, pytorch_svd, wan2.1, cybernetic, surreal, cosmic).
+            duration_seconds: Desired clip length. Frames are derived as
+                duration * fps, which is the length people actually think in.
 
         Returns:
-            Dictionary with clip metadata, output filepath, and web URL.
+            Dictionary with clip metadata, output filepath, and web URL, including
+            the estimate made before rendering and the time actually taken.
         """
+        requested_duration = duration_seconds
+        if duration_seconds is not None:
+            if duration_seconds <= 0:
+                return {"success": False, "error": "duration_seconds must be positive"}
+            num_frames = max(1, int(round(duration_seconds * fps)))
+
+        engine_key = "svd" if style in SVD_STYLES or os.environ.get("USE_PYTORCH_VIDEO") == "true" else "procedural"
+        frames_requested = num_frames
+        clamp_note = None
+        if engine_key == "svd" and num_frames > SVD_MAX_FRAMES:
+            # Stable Video Diffusion is trained for a fixed short window; asking
+            # for more silently produced something else or failed.
+            num_frames = SVD_MAX_FRAMES
+            clamp_note = (
+                f"Stable Video Diffusion generates at most {SVD_MAX_FRAMES} frames per pass, so "
+                f"{frames_requested} was clamped to {SVD_MAX_FRAMES} "
+                f"({round(SVD_MAX_FRAMES / max(1, fps), 2)}s at {fps}fps). Longer clips need "
+                f"multiple passes stitched together, which this engine does not do yet."
+            )
+
+        estimate = render_estimator.estimate(engine_key, width, height, num_frames)
+        render_started = time.time()
         clip_id = f"clip_{int(time.time())}"
         filename = f"{clip_id}.gif"
         filepath = os.path.join(self.output_dir, filename)
@@ -156,7 +216,7 @@ class VideoAgent:
         frames = None
 
         # Attempt PyTorch SVD Video Diffusion if requested or available
-        if style in ["pytorch_svd", "wan2.1", "animatediff", "sota_diffusion"] or os.environ.get("USE_PYTORCH_VIDEO") == "true":
+        if engine_key == "svd":
             frames = self.pytorch_video_engine.generate_video_diffusion(
                 prompt=enhanced_prompt,
                 width=width,
@@ -191,6 +251,13 @@ class VideoAgent:
 
         web_path = f"/static/videos/{filename}"
 
+        elapsed = round(time.time() - render_started, 2)
+        used_svd = bool(frames and self.pytorch_video_engine.initialized)
+        # Record against the engine that actually ran, not the one requested, so
+        # a fallback to the procedural path cannot poison the diffusion estimate.
+        render_estimator.record("svd" if used_svd else "procedural",
+                                width, height, num_frames, elapsed)
+
         return {
             "success": True,
             "clip_id": clip_id,
@@ -198,8 +265,15 @@ class VideoAgent:
             "enhanced_prompt": enhanced_prompt,
             "dimensions": {"width": width, "height": height},
             "num_frames": num_frames,
+            "frames_requested": frames_requested,
+            "frames_clamped": frames_requested != num_frames,
+            "clamp_note": clamp_note,
             "fps": fps,
+            "duration_requested_seconds": requested_duration,
             "duration_seconds": round(num_frames / fps, 2),
+            "estimated_seconds": estimate.get("estimate_seconds"),
+            "estimate_basis": estimate.get("basis"),
+            "render_seconds": elapsed,
             "style": style,
             "engine": "PyTorch MPS Video Diffusion (Apple Silicon)" if (frames and self.pytorch_video_engine.initialized) else "Procedural animation placeholder (no video diffusion model loaded)",
             "placeholder": not (frames and self.pytorch_video_engine.initialized),

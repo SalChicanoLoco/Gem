@@ -94,3 +94,4 @@ extensions/*.py
 # Everything the acquisition agent downloads lands here first and is promoted
 # out explicitly. Never tracked: it is other people's bytes.
 downloads/
+config/render_calibration.json
