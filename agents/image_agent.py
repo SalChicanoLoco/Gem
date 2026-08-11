@@ -121,33 +121,6 @@ class ImageAgent:
         except requests.exceptions.RequestException as e:
             return {"success": False, "error": f"API request failed: {str(e)}"}
 
-    def _generate_mock_response(
-        self,
-        prompt: str,
-        width: int,
-        height: int,
-        style: str | None,
-    ) -> dict[str, Any]:
-        """
-        Generate a mock response for development/testing.
-
-        Returns:
-            Dictionary with mock image data.
-        """
-        # Generate a deterministic ID based on the prompt
-        prompt_hash = hashlib.md5(prompt.encode()).hexdigest()[:12]
-
-        return {
-            "success": True,
-            "mock": True,
-            "image_id": f"mock_{prompt_hash}",
-            "prompt": prompt,
-            "dimensions": {"width": width, "height": height},
-            "style": style,
-            "message": "Mock response - configure IMAGE_API_KEY for real generation",
-            "placeholder_url": f"https://via.placeholder.com/{width}x{height}.png?text={prompt[:20]}",
-        }
-
     def get_image_status(self, image_id: str) -> dict[str, Any]:
         """
         Check the status of an image generation request.

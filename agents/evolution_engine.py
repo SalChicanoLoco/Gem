@@ -14,6 +14,7 @@ from .coder_agent import CoderAgent
 from .auto_healer import AutoHealer
 from .debate_engine import DebateEngine
 from .spine import get_spine
+from . import runtime_load
 
 logger = logging.getLogger(__name__)
 
@@ -61,9 +62,23 @@ class AutonomousEvolutionEngine:
         cycle_id = f"evo_{int(time.time())}"
         logger.info(f"Starting Autonomous Evolution Cycle {cycle_id} for goal: {target_goal}")
 
-        # Stage 1: Self-Diagnostic & Optimization Strategy
-        queue_status = {"pending": 2, "processing": 1, "completed": len(self.evolution_history)}
-        load_metrics = {"load_score": 35.0, "queue_length": 2}
+        # Stage 1: Self-Diagnostic & Optimization Strategy.
+        # These were hardcoded to {"pending": 2, "processing": 1} and
+        # {"load_score": 35.0, "queue_length": 2}, so the "self-diagnostic" asked
+        # the model to reason about invented telemetry and reported the answer as
+        # though it described this machine. Real figures now.
+        live = runtime_load.snapshot()
+        queue_status = {
+            "in_flight": live["in_flight"],
+            "in_flight_by_kind": live["in_flight_by_kind"],
+            "completed_cycles": len(self.evolution_history),
+        }
+        load_metrics = {
+            "load_score": live["score"],
+            "cpu_percent": live["cpu_percent"],
+            "memory_mb": live["memory_mb"],
+            "queue_length": live["in_flight"],
+        }
         opt_result = self.gemma.self_optimize_workflow(queue_status, load_metrics)
 
         # Stage 2: Tool Synthesis & Capability Extension.
@@ -83,13 +98,16 @@ class AutonomousEvolutionEngine:
             rounds=2,
         )
 
-        # Stage 4: Auto-Healer Health Check Verification
-        health_check_payload = {"val": "100.0", "target": target_goal}
+        # Stage 4: exercise the AutoHealer's repair path.
+        # Named "Health Check Verification" while multiplying a hardcoded "100.0"
+        # by 2.5, which verified nothing about the system. It is a self-test of the
+        # healer's string-to-number coercion, and is now labelled as one.
         heal_result = self.healer.execute_with_repair(
             task_func=lambda d: float(d["val"]) * 2.5,
-            payload=health_check_payload,
+            payload={"val": "100.0", "target": target_goal},
         )
 
+        status = "evolved" if synthesis_result.get("success") else "blocked"
         record = {
             "cycle_id": cycle_id,
             "timestamp": time.time(),
@@ -98,10 +116,14 @@ class AutonomousEvolutionEngine:
                 "gemma_optimization": opt_result.get("recommendations"),
                 "tool_synthesized": synthesis_result.get("filename"),
                 "tool_blocked_by_guard": synthesis_result.get("triggered_guards"),
-                "debate_consensus": debate_result.get("consensus_verdict"),
-                "auto_healer_status": heal_result.get("success"),
+                # DebateEngine returns final_verdict. This read consensus_verdict,
+                # a key it never emits, so every cycle discarded the debate it had
+                # just paid for and recorded None.
+                "debate_consensus": debate_result.get("final_verdict"),
+                "debate_approval_rate": debate_result.get("approval_rate"),
+                "auto_healer_selftest_passed": heal_result.get("success"),
             },
-            "status": "evolved" if synthesis_result.get("success") else "blocked",
+            "status": status,
         }
 
         # guard_005: never report a gain this cycle did not measure.
@@ -112,7 +134,10 @@ class AutonomousEvolutionEngine:
 
         self.evolution_history.append(record)
         return {
-            "success": True,
+            # Previously always True, so a cycle whose tool the guard blocked still
+            # reported success alongside status "blocked".
+            "success": status == "evolved",
+            "status": status,
             "cycle_id": cycle_id,
             "evolution_report": record,
             "total_cycles_executed": len(self.evolution_history),

@@ -3,6 +3,8 @@ Extended Unit Test Suite for Master Spine and Advanced Gemma Agents.
 """
 
 import os
+from unittest.mock import patch
+
 import pytest
 from agents import (
     MasterSpineCoordinator,
@@ -138,16 +140,36 @@ class TestDebateEngine:
     """Tests for Multi-Agent Debate Engine."""
 
     def test_run_debate(self):
-        """Test debate engine consensus round."""
+        """A debate whose personas state verdicts reaches a consensus."""
         engine = DebateEngine()
-        res = engine.run_debate(
-            topic="Deploying edge agent on Apple Silicon",
-            proposal={"hardware": "Apple M5 Pro", "ram": "24GB"},
-            rounds=1,
-        )
+        with patch.object(engine.gemma, "generate",
+                          return_value="Risks are manageable. Score 82. Verdict: APPROVED"):
+            res = engine.run_debate(
+                topic="Deploying edge agent on Apple Silicon",
+                proposal={"hardware": "Apple M5 Pro", "ram": "24GB"},
+                rounds=1,
+            )
         assert res["success"] is True
-        assert "final_verdict" in res
+        assert res["final_verdict"] == "APPROVED"
+        assert res["verdicts_counted"] == 3
         assert "transcript" in res
+
+    def test_refusal_is_not_counted_as_approval(self):
+        """"I cannot approve this" used to match on the substring "approve"."""
+        engine = DebateEngine()
+        with patch.object(engine.gemma, "generate",
+                          return_value="I cannot approve this proposal; the risk is too high."):
+            res = engine.run_debate(topic="t", proposal={}, rounds=1)
+        assert res["final_verdict"] == "REJECTED"
+        assert res["approval_rate"] == 0.0
+
+    def test_no_readable_verdict_reports_no_consensus(self):
+        """An empty verdict set previously defaulted the approval rate to 100%."""
+        engine = DebateEngine()
+        with patch.object(engine.gemma, "generate", return_value="Interesting question."):
+            res = engine.run_debate(topic="t", proposal={}, rounds=1)
+        assert res["success"] is False
+        assert "no consensus" in res["error"]
 
 
 class TestRAGAgent:
@@ -179,9 +201,41 @@ class TestAutonomousEvolutionEngine:
         coder = CoderAgent(extensions_dir=str(tmp_path / "extensions"), boundary_guard=guard)
         engine = AutonomousEvolutionEngine(coder_agent=coder)
         result = engine.run_evolution_cycle("Self-test optimization")
-        assert result["success"] is True
+
+        # No measurable gain was declared, so guard_010 blocks the tool write and
+        # the cycle is blocked. success used to be hardcoded True, so it reported
+        # success alongside status "blocked".
+        assert result["status"] == "blocked"
+        assert result["success"] is False
         assert "cycle_id" in result
         assert result["total_cycles_executed"] >= 1
+
+    def test_gated_cycle_reports_the_debate_it_ran(self, tmp_path):
+        """
+        The report read debate_consensus from a key DebateEngine never emits, so
+        every cycle discarded its debate result and recorded None.
+        """
+        from agents.boundary_guard import BoundaryGuard
+        from agents.coder_agent import CoderAgent
+        from agents.evolution_engine import AutonomousEvolutionEngine
+
+        guard = BoundaryGuard(
+            log_path=str(tmp_path / "log.jsonl"),
+            manifest_path=str(tmp_path / "manifest.json"),
+        )
+        coder = CoderAgent(extensions_dir=str(tmp_path / "extensions"), boundary_guard=guard)
+        engine = AutonomousEvolutionEngine(coder_agent=coder)
+
+        with patch.object(engine.debate.gemma, "generate", return_value="Verdict: APPROVED"):
+            result = engine.run_evolution_cycle(
+                "Self-test optimization",
+                measurable_gain="Halves queue drain time on a 20-task backlog",
+                validation_criterion="run({}) returns a dict",
+            )
+
+        stages = result["evolution_report"]["stages"]
+        assert stages["debate_consensus"] == "APPROVED"
+        assert stages["debate_approval_rate"] == 100.0
 
     def test_evolution_cycle_blocks_ungated_tool_write(self, tmp_path):
         """A cycle that declares no gain must not leave a tool behind."""

@@ -55,66 +55,27 @@ class ArtAgent:
         if not image_data.get("image_url") and not image_data.get("image_base64"):
             return {"success": False, "error": "image_url or image_base64 is required"}
 
-        # Mock aesthetic analysis for development
-        # In production, this would call an external API
-        return self._mock_aesthetic_analysis(image_data)
-
-    def _mock_aesthetic_analysis(self, image_data: dict[str, Any]) -> dict[str, Any]:
-        """Generate mock aesthetic analysis results."""
-        image_id = image_data.get("image_url", image_data.get("image_base64", ""))
-        hash_val = hashlib.md5(str(image_id).encode()).hexdigest()
-
-        # Generate deterministic scores based on hash
-        base_score = int(hash_val[:2], 16) / 255 * 100
-
+        # There is no vision backend, so there is no analysis.
+        #
+        # This used to derive "aesthetic_scores" from an MD5 of the image URL and
+        # return them with mock: true. The numbers moved when the URL changed, so
+        # they looked responsive, but nothing ever opened the image: a URL that
+        # does not exist scored 48.63 for composition, colour harmony and
+        # lighting. A refusal is more useful than a plausible number.
+        #
+        # No client is written here for a backend that does not exist yet, since
+        # an untested integration against the placeholder api.example.com endpoint
+        # would be the next thing to quietly stop meaning anything. For measurable
+        # image properties on local files, agents/image_metrics.py does real work.
         return {
-            "success": True,
-            "mock": True,
-            "aesthetic_scores": {
-                "overall": round(base_score, 2),
-                "composition": round((base_score + 10) % 100, 2),
-                "color_harmony": round((base_score + 20) % 100, 2),
-                "lighting": round((base_score + 15) % 100, 2),
-                "balance": round((base_score + 5) % 100, 2),
-                "contrast": round((base_score + 25) % 100, 2),
-            },
-            "style_classification": self._classify_style(base_score),
-            "mood": self._classify_mood(base_score),
-            "dominant_colors": self._extract_colors(hash_val),
+            "success": False,
+            "analysed": False,
+            "error": (
+                "aesthetic analysis is not implemented: this build has no vision model. "
+                "agents/image_metrics.py provides measured SSIM and colour-histogram "
+                "comparison for local images."
+            ),
         }
-
-    @staticmethod
-    def _classify_style(score: float) -> str:
-        """Classify image style based on score."""
-        styles = [
-            "minimalist", "abstract", "realistic", "impressionist",
-            "surrealist", "contemporary", "classical", "pop-art",
-        ]
-        return styles[int(score) % len(styles)]
-
-    @staticmethod
-    def _classify_mood(score: float) -> str:
-        """Classify image mood based on score."""
-        moods = [
-            "serene", "energetic", "melancholic", "joyful",
-            "mysterious", "dramatic", "peaceful", "intense",
-        ]
-        return moods[int(score) % len(moods)]
-
-    @staticmethod
-    def _extract_colors(hash_val: str) -> list[dict[str, Any]]:
-        """Extract dominant colors from hash (mock implementation)."""
-        colors = []
-        for i in range(3):
-            r = int(hash_val[i * 2:i * 2 + 2], 16)
-            g = int(hash_val[i * 2 + 6:i * 2 + 8], 16)
-            b = int(hash_val[i * 2 + 12:i * 2 + 14], 16)
-            colors.append({
-                "hex": f"#{r:02x}{g:02x}{b:02x}",
-                "rgb": {"r": r, "g": g, "b": b},
-                "percentage": round(100 / (i + 1.5), 1),
-            })
-        return colors
 
     def create_image_set(
         self,
@@ -333,15 +294,19 @@ class ArtAgent:
 
         intensity = max(0.0, min(1.0, intensity))
 
-        # Mock style transfer result
+        # Returned success: True with a fresh uuid as a "result_id", so a caller
+        # reading only success believed an image had been produced. No transfer
+        # happens here and none is claimed.
         return {
-            "success": True,
-            "mock": True,
+            "success": False,
             "original_image": source_image,
             "target_style": target_style,
             "intensity": intensity,
-            "result_id": str(uuid.uuid4())[:12],
-            "message": "Style transfer mock - configure VISION_API_KEY for real processing",
+            "error": (
+                "style transfer is not implemented: this build has no style-transfer model. "
+                "For local stylisation, train a LoRA with agents/lora_trainer.py and apply it "
+                "via the diffusion engine's lora_path."
+            ),
         }
 
     def list_available_styles(self) -> list[str]:
