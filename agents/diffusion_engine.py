@@ -113,7 +113,11 @@ class PyTorchDiffusionEngine:
             dtype: Inference precision override ("float16", "bfloat16", "float32").
                 Defaults to float16 on MPS and float32 elsewhere.
         """
-        self.model_id = model_id or os.environ.get("DEFAULT_SD_MODEL", "segmind/tiny-sd")
+        # SD 1.5 rather than tiny-sd: on the same seed and prompt tiny-sd renders
+        # unrecognisable subjects, and it is not even the faster option any more
+        # because it is pinned to float32 while SD 1.5 runs in half precision
+        # (measured 9.3s against 11.2s at 512x512, 50 steps).
+        self.model_id = model_id or os.environ.get("DEFAULT_SD_MODEL", "runwayml/stable-diffusion-v1-5")
         self.lora_path = lora_path or os.environ.get("DEFAULT_LORA_PATH") or None
         self.use_mps = use_mps and MPS_AVAILABLE
         self.device = "mps" if self.use_mps else ("cuda" if TORCH_AVAILABLE and torch.cuda.is_available() else "cpu")

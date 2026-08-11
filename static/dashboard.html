@@ -733,9 +733,9 @@
                     <div>
                         <label>Model Architecture</label>
                         <select id="photoModel">
-                            <option value="segmind/tiny-sd" selected>Tiny-SD (500MB Fast)</option>
-                            <option value="stabilityai/sdxl-turbo">SDXL Turbo (Realtime HD)</option>
-                            <option value="runwayml/stable-diffusion-v1-5">SD v1.5 (Classic HD)</option>
+                            <option value="runwayml/stable-diffusion-v1-5" selected>SD v1.5 (default, best quality)</option>
+                            <option value="segmind/tiny-sd">Tiny-SD (small, low quality)</option>
+                            <option value="stabilityai/sdxl-turbo">SDXL Turbo (untested here)</option>
                         </select>
                     </div>
                     <div>
@@ -1155,7 +1155,7 @@
         // Photorealistic Image Studio
         async function runPhotorealImage() {
             const prompt = document.getElementById('photoPrompt').value;
-            const modelId = document.getElementById('photoModel')?.value || 'segmind/tiny-sd';
+            const modelId = document.getElementById('photoModel')?.value || 'runwayml/stable-diffusion-v1-5';
             const [width, height] = document.getElementById('photoRes').value.split('x').map(Number);
             const steps = Number(document.getElementById('photoSteps').value);
             const negPrompt = document.getElementById('photoNegPrompt')?.value;
@@ -1871,44 +1871,53 @@
             msg.innerHTML = `<strong>${sender}:</strong> ${escapeHtml(text)}`;
             box.appendChild(msg);
             box.scrollTop = box.scrollHeight;
+            return msg;
         }
 
+        // Feedback goes to the model and comes back as the model's words.
+        //
+        // This previously matched keywords in the feedback and, on a hit, replaced
+        // the negative prompt with a fixed string and appended "solo 1person,
+        // single subject, centered composition, anatomically correct body
+        // structure" to whatever the user had typed — human-anatomy tokens that
+        // fight any prompt about an animal. It then claimed "Negative prompt
+        // weights updated with strict single-subject & body integrity locks",
+        // which describes a mechanism that does not exist, and the model was never
+        // consulted. The engine had the same keyword rewriting removed in
+        // e034558; this was the surviving copy.
         async function processFeedback(feedbackText) {
-            appendFeedbackMsg('Gemma', 'Processing feedback & auto-correcting negative prompt weights...');
-            
-            if (feedbackText.toLowerCase().includes('anatomy') || feedbackText.toLowerCase().includes('head') || feedbackText.toLowerCase().includes('body') || feedbackText.toLowerCase().includes('image') || feedbackText.toLowerCase().includes('solo') || feedbackText.toLowerCase().includes('negative') || feedbackText.toLowerCase().includes('fix')) {
-                const photoInput = document.getElementById('photoPrompt');
-                const photoNeg = document.getElementById('photoNegPrompt');
-                
-                if (photoNeg) {
-                    photoNeg.value = "multiple subjects, multiple people, multiple heads, merged bodies, fused torsos, extra limbs, extra heads, duplicate bodies, bad anatomy, deformed limbs, disfigured, malformed body, mutated hands, bad proportions, distorted faces, overlapping bodies, double head, extra arms, extra legs, missing limbs, blurry, cartoon";
-                }
-                if (photoInput && !photoInput.value.includes('solo 1person')) {
-                    photoInput.value = `${photoInput.value}, solo 1person, single subject, centered composition, anatomically correct body structure`;
-                }
+            const promptBox = document.getElementById('photoPrompt');
+            const context = promptBox && promptBox.value
+                ? `The current image prompt is: "${promptBox.value}".`
+                : 'No image prompt is set yet.';
 
-                appendFeedbackMsg('Gemma', '✅ Negative prompt weights updated with strict single-subject & body integrity locks! Re-rendering image...');
-                switchTab('tab-photo');
-                runPhotorealImage();
-            } else {
-                try {
-                    const res = await fetch(`${API_BASE}/v1/chat/completions`, {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({
-                            model: 'gemma2:2b',
-                            messages: [{ role: 'user', content: `Feedback received: ${feedbackText}. Provide a concise 1-sentence action plan.` }]
-                        })
-                    });
-                    const data = await res.json();
-                    const reply = data.choices[0].message.content;
-                    appendFeedbackMsg('Gemma', reply);
-                    if (document.getElementById('autoTTSCheck')?.checked) {
-                        speakText(reply);
-                    }
-                } catch(e) {
-                    appendFeedbackMsg('Gemma', 'Feedback recorded. Pipeline weights adjusted.');
+            const bubble = appendFeedbackMsg('Gemma', 'Thinking...');
+
+            try {
+                const res = await fetch(`${API_BASE}/api/gemma`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        action: 'chat',
+                        conversation_id: 'dashboard-feedback',
+                        message: `${context}\nThe user's critique of the rendered image: "${feedbackText}".\n`
+                            + 'Reply with an improved image prompt on a single line, then one short sentence '
+                            + 'explaining the change. Do not invent details the user did not ask for.'
+                    })
+                });
+                const data = await res.json();
+                if (!data.success) {
+                    bubble.innerHTML = `<strong>Gemma:</strong> ${escapeHtml('Unavailable: ' + (data.error || 'unknown error'))}`;
+                    return;
                 }
+                bubble.innerHTML = `<strong>Gemma:</strong> ${escapeHtml(data.response)}`;
+                if (document.getElementById('autoTTSCheck')?.checked) {
+                    speakText(data.response);
+                }
+            } catch (e) {
+                // Say what happened. "Feedback recorded. Pipeline weights adjusted."
+                // used to appear here, and nothing was recorded or adjusted.
+                bubble.innerHTML = `<strong>Gemma:</strong> ${escapeHtml('Could not reach the API: ' + e.message)}`;
             }
         }
     </script>
