@@ -79,6 +79,12 @@ My Training data/
 config/runtime_action_log.jsonl
 config/rollback_manifest.json
 
+# Benchmark result written by EdgeDiffusionOptimizer. Despite living under
+# config/ nothing ever reads it back — it is an output, not an input — and it is
+# rewritten with new timings on every run, so tracking it made the tree dirty
+# after each `pytest`.
+config/edge_optimization.json
+
 # Tools written at runtime by the evolution engine
 extensions/*.py
 !extensions/__init__.py
