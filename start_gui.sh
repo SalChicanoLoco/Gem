@@ -1,18 +1,20 @@
 #!/bin/bash
-# Startup Launcher Script for SenaAIgent Control Center
-# Runs CleanHouse pre-flight port sweep, starts API server on Port 5005, and opens GUI dashboard.
+# Startup Launcher for the SenaAIgent Control Center.
+#
+# Delegates to scripts/start_stack.py, which starts and then verifies every
+# component rather than assuming any of them came up. Starting the API alone left
+# chat broken whenever Ollama was not already running, and the failure only
+# surfaced later in the UI.
+#
+#   ./start_gui.sh              start everything and open the dashboard
+#   ./start_gui.sh --check      report what is running, start nothing
+#   ./start_gui.sh --strict     exit non-zero unless chat works too
+#
+# Exit code is 0 only when everything required is up.
 
-echo "============================================================"
-echo "🚀 Launching SenaAIgent Pre-AI OS & Control Center"
-echo "============================================================"
+cd "$(dirname "$0")" || exit 1
 
-# Navigate to repository directory
-cd "$(dirname "$0")"
+PYTHON="./venv/bin/python"
+[ -x "$PYTHON" ] || PYTHON="python3"
 
-# Execute CleanHouse pre-flight port sweep
-./venv/bin/python scripts/cleanhouse.py
-
-# Launch web server and open dashboard in browser
-echo "🌐 Starting API Server on Port 5005..."
-(sleep 2 && open "http://localhost:5005/dashboard") &
-PORT=5005 ./venv/bin/python start_api.py
+exec "$PYTHON" scripts/start_stack.py "$@"

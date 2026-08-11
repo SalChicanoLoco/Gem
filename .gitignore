@@ -49,6 +49,8 @@ htmlcov/
 
 # Logs
 *.log
+# Where start_stack.py redirects the API and Ollama output
+logs/
 
 # Local configuration
 .env
