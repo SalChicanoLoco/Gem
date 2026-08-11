@@ -301,6 +301,93 @@
             white-space: pre-wrap;
             margin-top: 1rem;
         }
+        /* Master switch: a physical throw switch rendered in CSS 3D.
+           Instrument-panel styling rather than a toy — machined metal, a recessed
+           rail, and a lever that actually travels through depth when thrown. */
+        .master-switch {
+            display: flex;
+            align-items: center;
+            gap: 0.7rem;
+            padding: 0.45rem 0.8rem 0.45rem 0.55rem;
+            border-radius: 0.6rem;
+            background: linear-gradient(180deg, rgba(30,41,59,0.9), rgba(10,15,25,0.95));
+            border: 1px solid rgba(148,163,184,0.22);
+            box-shadow: inset 0 1px 0 rgba(255,255,255,0.05), 0 6px 18px rgba(0,0,0,0.45);
+        }
+        .ms-rail {
+            perspective: 240px;
+            width: 62px;
+            height: 34px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            position: relative;
+        }
+        .ms-track {
+            position: absolute;
+            inset: 6px 2px;
+            border-radius: 999px;
+            background: linear-gradient(180deg, #05080f, #131c2b);
+            box-shadow: inset 0 2px 5px rgba(0,0,0,0.85), inset 0 -1px 0 rgba(255,255,255,0.04);
+        }
+        .ms-lever {
+            position: relative;
+            width: 26px;
+            height: 30px;
+            cursor: pointer;
+            transform-style: preserve-3d;
+            /* Down = off. The throw is a rotation about the rail, so the lever
+               genuinely pitches through depth rather than sliding sideways. */
+            transform: translateX(-14px) rotateX(38deg);
+            transition: transform 260ms cubic-bezier(.22,1.4,.36,1);
+            outline: none;
+        }
+        .ms-lever-face {
+            position: absolute;
+            inset: 0;
+            border-radius: 5px;
+            background: linear-gradient(150deg, #e2e8f0 0%, #94a3b8 42%, #64748b 60%, #cbd5e1 100%);
+            box-shadow: 0 3px 7px rgba(0,0,0,0.6), inset 0 1px 0 rgba(255,255,255,0.85);
+        }
+        /* Machined ridges, so the lever reads as a grip rather than a rectangle. */
+        .ms-lever-edge {
+            position: absolute;
+            inset: 5px 4px;
+            border-radius: 3px;
+            background: repeating-linear-gradient(
+                180deg, rgba(15,23,42,0.35) 0 1px, transparent 1px 4px);
+        }
+        .master-switch.on .ms-lever { transform: translateX(14px) rotateX(-38deg); }
+        .master-switch.on .ms-track {
+            background: linear-gradient(180deg, #052e1a, #0d5f37);
+            box-shadow: inset 0 2px 5px rgba(0,0,0,0.7), 0 0 12px rgba(34,197,94,0.35);
+        }
+        .master-switch.partial .ms-track {
+            background: linear-gradient(180deg, #3a2a05, #7a5308);
+            box-shadow: inset 0 2px 5px rgba(0,0,0,0.7), 0 0 12px rgba(245,158,11,0.3);
+        }
+        .master-switch.busy .ms-lever { transition-duration: 90ms; opacity: 0.75; }
+        .ms-lever:focus-visible .ms-lever-face { box-shadow: 0 0 0 2px var(--accent-cyan); }
+        .ms-readout { min-width: 116px; line-height: 1.15; }
+        .ms-state {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.72rem;
+            font-weight: 700;
+            letter-spacing: 0.09em;
+            color: #94a3b8;
+        }
+        .master-switch.on .ms-state { color: #22c55e; }
+        .master-switch.partial .ms-state { color: #f59e0b; }
+        .master-switch.off .ms-state { color: #64748b; }
+        .ms-detail {
+            font-size: 0.62rem;
+            color: var(--text-secondary);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            max-width: 190px;
+        }
+
         /* A failed call must not read like console output from a working one. */
         .output-console.console-error {
             color: #f59e0b;
@@ -590,6 +677,23 @@
                 <div class="hardware-badge unknown" id="hardwareBadge">
                     <div class="hardware-dot"></div>
                     <span id="hardwareStatusText">Checking status…</span>
+                </div>
+
+                <!-- Master switch. Its position is driven by measured state, not by
+                     what was last clicked, so it cannot show ON over a dead stack. -->
+                <div class="master-switch" id="masterSwitch" title="Master power for the AI stack">
+                    <div class="ms-rail">
+                        <div class="ms-track"></div>
+                        <div class="ms-lever" id="msLever" role="switch" aria-checked="false"
+                             tabindex="0" aria-label="Master power">
+                            <div class="ms-lever-face"></div>
+                            <div class="ms-lever-edge"></div>
+                        </div>
+                    </div>
+                    <div class="ms-readout">
+                        <div class="ms-state" id="msState">CHECKING</div>
+                        <div class="ms-detail" id="msDetail">reading stack…</div>
+                    </div>
                 </div>
             </div>
         </header>
@@ -1066,6 +1170,111 @@
                 text.textContent = 'API unreachable';
                 badge.classList.remove('degraded');
                 badge.classList.add('unknown');
+            }
+        }
+
+        // ---- Master switch -------------------------------------------------
+        // The lever position is set from measured state returned by /api/power,
+        // never from what was clicked. A switch that latched to the click would
+        // read ON over a dead model server, which is the failure this dashboard
+        // has spent its time removing.
+
+        let msBusy = false;
+
+        // Sound is synthesised rather than shipped as an asset: a relay clack for
+        // the throw, and a short rising tone when the stack confirms it is up.
+        function msSound(kind) {
+            if (!window.AudioContext && !window.webkitAudioContext) return;
+            if (document.getElementById('msMute')?.checked) return;
+            try {
+                const ctx = new (window.AudioContext || window.webkitAudioContext)();
+                const now = ctx.currentTime;
+                if (kind === 'clack') {
+                    // Filtered noise burst: the mechanical part of the throw.
+                    const len = Math.floor(ctx.sampleRate * 0.05);
+                    const buf = ctx.createBuffer(1, len, ctx.sampleRate);
+                    const data = buf.getChannelData(0);
+                    for (let i = 0; i < len; i++) data[i] = (Math.random() * 2 - 1) * (1 - i / len) ** 3;
+                    const src = ctx.createBufferSource(); src.buffer = buf;
+                    const bp = ctx.createBiquadFilter(); bp.type = 'bandpass';
+                    bp.frequency.value = 1800; bp.Q.value = 1.2;
+                    const g = ctx.createGain(); g.gain.value = 0.18;
+                    src.connect(bp).connect(g).connect(ctx.destination);
+                    src.start(now); src.stop(now + 0.06);
+                } else {
+                    const osc = ctx.createOscillator(); const g = ctx.createGain();
+                    osc.type = 'sine';
+                    osc.frequency.setValueAtTime(220, now);
+                    osc.frequency.exponentialRampToValueAtTime(660, now + 0.28);
+                    g.gain.setValueAtTime(0.0001, now);
+                    g.gain.exponentialRampToValueAtTime(0.12, now + 0.05);
+                    g.gain.exponentialRampToValueAtTime(0.0001, now + 0.42);
+                    osc.connect(g).connect(ctx.destination);
+                    osc.start(now); osc.stop(now + 0.45);
+                }
+                setTimeout(() => ctx.close(), 800);
+            } catch (e) { /* audio is decoration; never let it break the switch */ }
+        }
+
+        function msRender(data) {
+            const box = document.getElementById('masterSwitch');
+            const state = document.getElementById('msState');
+            const detail = document.getElementById('msDetail');
+            if (!box) return;
+
+            const s = data && data.state ? data.state : 'unknown';
+            box.classList.remove('on', 'off', 'partial');
+            box.classList.add(s === 'on' ? 'on' : s === 'partial' ? 'partial' : 'off');
+            document.getElementById('msLever')?.setAttribute('aria-checked', String(s === 'on'));
+
+            state.textContent = s === 'on' ? 'ONLINE'
+                : s === 'partial' ? 'PARTIAL' : s === 'off' ? 'OFFLINE' : 'UNKNOWN';
+
+            const c = (data && data.components) || {};
+            const down = Object.entries(c).filter(([, v]) => !v.up).map(([k]) => k.replace('_', ' '));
+            detail.textContent = s === 'on'
+                ? (c.model?.detail || 'all systems up')
+                : down.length ? `down: ${down.join(', ')}` : 'state unknown';
+            detail.title = Object.entries(c).map(([k, v]) => `${k}: ${v.detail}`).join('\n');
+        }
+
+        async function msRefresh() {
+            try {
+                const res = await fetch(`${API_BASE}/api/power`);
+                msRender(await res.json());
+            } catch (e) {
+                msRender({ state: 'unknown', components: {} });
+            }
+        }
+
+        async function msThrow() {
+            if (msBusy) return;
+            const box = document.getElementById('masterSwitch');
+            const goingOn = !box.classList.contains('on');
+            msBusy = true;
+            box.classList.add('busy');
+            msSound('clack');
+            document.getElementById('msState').textContent = goingOn ? 'STARTING' : 'STOPPING';
+            document.getElementById('msDetail').textContent = goingOn
+                ? 'bringing the stack up…' : 'releasing models…';
+
+            try {
+                const res = await fetch(`${API_BASE}/api/power`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ action: goingOn ? 'on' : 'off' })
+                });
+                const data = await res.json();
+                msRender(data);
+                // The wake tone only plays if the stack genuinely came up.
+                if (goingOn && data.state === 'on') msSound('wake');
+                if (data.actions) console.log('[master switch]', data.actions.join('; '));
+            } catch (e) {
+                msRender({ state: 'unknown', components: {} });
+                document.getElementById('msDetail').textContent = `switch failed: ${e.message}`;
+            } finally {
+                msBusy = false;
+                box.classList.remove('busy');
             }
         }
 
@@ -1795,10 +2004,23 @@
         }
 
         // Init
+        (function wireMasterSwitch() {
+            const lever = document.getElementById('msLever');
+            if (!lever) return;
+            lever.addEventListener('click', msThrow);
+            lever.addEventListener('keydown', e => {
+                if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); msThrow(); }
+            });
+        })();
+
         fetchDashboard();
         fetchHardwareStatus();
+        msRefresh();
         setInterval(fetchDashboard, 5000);
         setInterval(fetchHardwareStatus, 15000);
+        // Polled independently so the lever tracks the stack even when something
+        // else stops Ollama from outside the dashboard.
+        setInterval(() => { if (!msBusy) msRefresh(); }, 10000);
         initVocalEngine();
     </script>
 

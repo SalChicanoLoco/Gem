@@ -8,7 +8,7 @@ import os
 import time
 from flask import Flask, jsonify, request, send_from_directory, Response, stream_with_context, make_response
 
-from agents import render_estimator, runtime_load, sandbox, web_acquire
+from agents import power, render_estimator, runtime_load, sandbox, web_acquire
 from agents import video_agent as video_agent_module
 from agents import (
     ModelAgent,
@@ -1186,6 +1186,29 @@ def create_app():
             return jsonify({"success": False, "error": f"Unknown action: {action!r}"}), 400
         except Exception as e:
             return jsonify({"success": False, "error": str(e)}), 500
+
+    @app.route("/api/power", methods=["GET", "POST"])
+    def power_api():
+        """
+        Master switch for the AI stack.
+
+        GET reports measured state. POST with action on/off/status drives it. The
+        web server is deliberately outside the switch's scope: it serves the page
+        the switch lives on.
+        """
+        engines = [image_agent.diffusion_engine, video_agent.pytorch_video_engine]
+        if request.method == "GET":
+            return jsonify(power.status(engines))
+
+        data = request.get_json(silent=True) or {}
+        action = data.get("action", "status")
+        if action == "on":
+            return jsonify(power.power_on(engines))
+        if action == "off":
+            return jsonify(power.power_off(engines))
+        if action == "status":
+            return jsonify(power.status(engines))
+        return jsonify({"success": False, "error": f"Unknown action: {action!r}"}), 400
 
     @app.route("/dashboard")
     def dashboard_page():
