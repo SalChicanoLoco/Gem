@@ -8,6 +8,7 @@ and multi-agent prompt synthesis running on Apple Silicon hardware.
 
 import json
 import logging
+import os
 import time
 from typing import Any, Dict, List, Optional
 import requests
@@ -85,11 +86,62 @@ class GemmaAgent:
         self.ollama_host = ollama_host.rstrip("/")
         self.timeout = timeout
         self.conversations = ConversationStore()
+        self.num_ctx: Optional[int] = None
+        self._context_probed = False
         self.system_prompt = (
             "You are Gemma, an advanced local AI reasoning engine running inside SenaAIgent Pre-AI OS. "
             "Your task is to analyze telemetry, optimize task queues, synthesize creative prompts, "
             "and perform self-reflective agentic reasoning."
         )
+
+    def context_length(self) -> Optional[int]:
+        """
+        The model's own context window, asked of Ollama and cached.
+
+        Ollama does not use the full window unless told to. Measured here with
+        gemma2:2b, which declares 8192: with no num_ctx the prompt was truncated
+        at about 2050 tokens no matter how much was sent, and a fact placed at the
+        start of a longer prompt was silently dropped. Passing num_ctx doubled the
+        accepted prompt. So the window is asked for explicitly rather than left to
+        a default that quietly discards the beginning of a conversation.
+
+        $GEMMA_NUM_CTX overrides, which matters because a larger window costs
+        memory per loaded model.
+        """
+        if self._context_probed:
+            return self.num_ctx
+        self._context_probed = True
+
+        override = os.environ.get("GEMMA_NUM_CTX")
+        if override:
+            try:
+                self.num_ctx = int(override)
+                return self.num_ctx
+            except ValueError:
+                logger.warning("Ignoring non-numeric GEMMA_NUM_CTX=%r", override)
+
+        try:
+            resp = requests.post(f"{self.ollama_host}/api/show",
+                                 json={"model": self.model_name}, timeout=5.0)
+            if resp.status_code == 200:
+                info = resp.json().get("model_info") or {}
+                for key, value in info.items():
+                    if key.endswith(".context_length") and isinstance(value, int):
+                        self.num_ctx = value
+                        logger.info("Model %s declares a %d-token context; requesting it explicitly.",
+                                    self.model_name, value)
+                        break
+        except Exception as e:
+            logger.warning("Could not read the context length for %s: %s", self.model_name, e)
+        return self.num_ctx
+
+    def _options(self, temperature: float) -> Dict[str, Any]:
+        """Sampling options, including the full context window when known."""
+        options: Dict[str, Any] = {"temperature": temperature}
+        ctx = self.context_length()
+        if ctx:
+            options["num_ctx"] = ctx
+        return options
 
     def is_available(self) -> bool:
         """
@@ -151,9 +203,7 @@ class GemmaAgent:
                 "prompt": prompt,
                 "system": sys_msg,
                 "stream": False,
-                "options": {
-                    "temperature": temperature,
-                },
+                "options": self._options(temperature),
             }
             resp = requests.post(url, json=payload, timeout=self.timeout)
             if resp.status_code == 200:
@@ -199,7 +249,7 @@ class GemmaAgent:
                     "model": self.model_name,
                     "messages": messages,
                     "stream": False,
-                    "options": {"temperature": temperature},
+                    "options": self._options(temperature),
                 },
                 timeout=self.timeout,
             )
@@ -256,7 +306,7 @@ class GemmaAgent:
                     "model": self.model_name,
                     "messages": messages,
                     "stream": True,
-                    "options": {"temperature": temperature},
+                    "options": self._options(temperature),
                 },
                 timeout=self.timeout,
                 stream=True,

@@ -131,6 +131,56 @@ class TestGemmaInferenceAndFallback:
             assert len(prompt) > 0
 
 
+class TestContextWindow:
+    """
+    Ollama does not use a model's full context unless asked. Measured with
+    gemma2:2b, which declares 8192: a ~4900-token prompt lost its opening at
+    num_ctx=2048 and was recalled correctly at 8192.
+    """
+
+    def test_context_length_is_read_from_the_model(self, gemma):
+        with patch("requests.post") as mock_post:
+            mock_post.return_value.status_code = 200
+            mock_post.return_value.json.return_value = {
+                "model_info": {"gemma2.context_length": 8192, "gemma2.embedding_length": 2304}}
+            assert gemma.context_length() == 8192
+
+    def test_the_window_is_requested_on_every_call(self, gemma):
+        with patch("requests.post") as mock_post:
+            mock_post.return_value.status_code = 200
+            mock_post.return_value.json.return_value = {"model_info": {"gemma2.context_length": 8192}}
+            options = gemma._options(0.5)
+        assert options["num_ctx"] == 8192
+        assert options["temperature"] == 0.5
+
+    def test_environment_override_wins(self, gemma, monkeypatch):
+        """A larger window costs memory per loaded model, so it stays tunable."""
+        monkeypatch.setenv("GEMMA_NUM_CTX", "4096")
+        assert gemma.context_length() == 4096
+
+    def test_a_non_numeric_override_is_ignored_rather_than_fatal(self, gemma, monkeypatch):
+        monkeypatch.setenv("GEMMA_NUM_CTX", "enormous")
+        with patch("requests.post") as mock_post:
+            mock_post.return_value.status_code = 200
+            mock_post.return_value.json.return_value = {"model_info": {"gemma2.context_length": 8192}}
+            assert gemma.context_length() == 8192
+
+    def test_the_probe_runs_once(self, gemma):
+        with patch("requests.post") as mock_post:
+            mock_post.return_value.status_code = 200
+            mock_post.return_value.json.return_value = {"model_info": {"gemma2.context_length": 8192}}
+            gemma.context_length()
+            gemma.context_length()
+            gemma.context_length()
+            assert mock_post.call_count == 1
+
+    def test_an_unreachable_probe_omits_the_option(self, gemma):
+        """Better to let Ollama default than to send a made-up window."""
+        with patch("requests.post", side_effect=Exception("offline")):
+            assert gemma.context_length() is None
+            assert "num_ctx" not in gemma._options(0.7)
+
+
 class TestConversationStore:
     """History is capped so a long session cannot grow without bound."""
 
