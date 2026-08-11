@@ -16,22 +16,40 @@ from PIL import Image, ImageDraw, ImageFont, ImageFilter
 from .gemma_agent import GemmaAgent
 from .spine import get_spine
 from .diffusion_engine import PyTorchDiffusionEngine, TORCH_AVAILABLE, MPS_AVAILABLE, DIFFUSERS_AVAILABLE
-from . import render_estimator
+from . import memory_manager, render_estimator
 
 # Styles routed to the Stable Video Diffusion pipeline rather than the procedural
 # fallback. SVD-xt is trained to emit a fixed short window, so a longer request is
 # clamped and reported instead of silently producing something else.
-SVD_STYLES = ("pytorch_svd", "wan2.1", "animatediff", "sota_diffusion")
+SVD_STYLES = ("pytorch_svd", "wan2.1", "sota_diffusion")
 SVD_MAX_FRAMES = 25
+
+# AnimateDiff is a motion module over an SD 1.5 UNet, so unlike SVD it is
+# conditioned on the text prompt for every frame rather than inferring motion
+# from a single keyframe. That difference is why SVD clips drift away from the
+# prompt into ambient movement. It also means an SD 1.5 LoRA applies to the video,
+# so an adapter trained here can style a clip.
+ANIMATEDIFF_STYLES = ("animatediff", "animate", "prompt_video")
+DEFAULT_MOTION_ADAPTER = os.environ.get(
+    "MOTION_ADAPTER_PATH", "downloads/quarantine/models/guoyww__animatediff-motion-adapter-v1-5-2")
+# The motion module is trained on 16-frame windows.
+ANIMATEDIFF_MAX_FRAMES = 16
 
 logger = logging.getLogger(__name__)
 
 # Check PyTorch Video Diffusion availability
 VIDEO_DIFFUSION_AVAILABLE = False
+ANIMATEDIFF_AVAILABLE = False
 try:
     from diffusers import StableVideoDiffusionPipeline
     import torch
     VIDEO_DIFFUSION_AVAILABLE = True
+except ImportError:
+    pass
+
+try:
+    from diffusers import AnimateDiffPipeline, MotionAdapter, DDIMScheduler
+    ANIMATEDIFF_AVAILABLE = True
 except ImportError:
     pass
 
@@ -72,6 +90,104 @@ class PyTorchVideoDiffusionEngine:
         except Exception as e:
             logger.error("Video pipeline failed to load: %s", e)
             return False
+
+    def generate_animatediff(
+        self,
+        prompt: str,
+        width: int = 512,
+        height: int = 512,
+        num_frames: int = 16,
+        num_inference_steps: int = 20,
+        negative_prompt: Optional[str] = None,
+        seed: Optional[int] = None,
+        lora_path: Optional[str] = None,
+        adapter_path: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Generate frames with AnimateDiff, which follows the prompt throughout.
+
+        Returns a dict rather than a bare list so a failure explains itself. The
+        base model is SD 1.5, so a LoRA trained by LoRALocalTrainer can be applied
+        and the clip carries that style.
+        """
+        if not (ANIMATEDIFF_AVAILABLE and TORCH_AVAILABLE):
+            return {"success": False, "error": "diffusers AnimateDiffPipeline is unavailable"}
+
+        adapter_dir = adapter_path or DEFAULT_MOTION_ADAPTER
+        if not os.path.isdir(adapter_dir):
+            return {"success": False, "error": (
+                f"motion adapter not found at {adapter_dir}. Fetch it with "
+                f"POST /api/acquire {{'action':'download_model','repo_id':"
+                f"'guoyww/animatediff-motion-adapter-v1-5-2'}}, or set $MOTION_ADAPTER_PATH."
+            )}
+
+        frames_requested = num_frames
+        clamp_note = None
+        if num_frames > ANIMATEDIFF_MAX_FRAMES:
+            num_frames = ANIMATEDIFF_MAX_FRAMES
+            clamp_note = (
+                f"the motion module is trained on {ANIMATEDIFF_MAX_FRAMES}-frame windows, so "
+                f"{frames_requested} was clamped to {ANIMATEDIFF_MAX_FRAMES}"
+            )
+
+        # Half precision on MPS, matching the image engine, but small frames blank
+        # in float16 for the same reason they do there.
+        dtype = torch.float32 if (self.device == "mps" and min(width, height) < 384) else self.inference_dtype()
+
+        try:
+            base = os.environ.get("DEFAULT_SD_MODEL", "runwayml/stable-diffusion-v1-5")
+            # AnimateDiff loads a second SD 1.5 UNet plus the motion module, so let
+            # go of the stills pipeline and any SVD weights first rather than
+            # holding three models at once.
+            memory_manager.release(self.image_engine, self)
+            logger.info("Loading AnimateDiff (%s + %s) on %s in %s...",
+                        base, adapter_dir, self.device, str(dtype).replace("torch.", ""))
+            adapter = MotionAdapter.from_pretrained(adapter_dir, torch_dtype=dtype)
+            pipe = AnimateDiffPipeline.from_pretrained(base, motion_adapter=adapter, torch_dtype=dtype)
+            pipe.scheduler = DDIMScheduler.from_pretrained(
+                base, subfolder="scheduler", clip_sample=False,
+                timestep_spacing="linspace", beta_schedule="linear", steps_offset=1)
+
+            applied_lora = None
+            if lora_path and os.path.isdir(lora_path):
+                try:
+                    pipe.load_lora_weights(lora_path)
+                    applied_lora = lora_path
+                    logger.info("Applied LoRA %s to the AnimateDiff pipeline.", lora_path)
+                except Exception as e:
+                    logger.error("LoRA %s did not apply to AnimateDiff: %s", lora_path, e)
+
+            pipe.enable_vae_slicing()
+            pipe.to(self.device)
+            pipe.set_progress_bar_config(disable=True)
+
+            generator = torch.Generator(device="cpu").manual_seed(
+                int(seed) if seed is not None else int(time.time()) % 2147483647)
+            started = time.time()
+            output = pipe(
+                prompt=prompt,
+                negative_prompt=negative_prompt or "blurry, lowres, watermark, text, distorted",
+                num_frames=num_frames,
+                width=width,
+                height=height,
+                num_inference_steps=num_inference_steps,
+                generator=generator,
+            )
+            frames = output.frames[0]
+            return {
+                "success": True,
+                "frames": frames,
+                "engine": "AnimateDiff (SD 1.5 motion module, prompt-conditioned)",
+                "dtype": str(dtype).replace("torch.", ""),
+                "lora": applied_lora,
+                "num_frames": len(frames),
+                "frames_requested": frames_requested,
+                "clamp_note": clamp_note,
+                "render_seconds": round(time.time() - started, 2),
+            }
+        except Exception as e:
+            logger.error("AnimateDiff generation failed: %s", e)
+            return {"success": False, "error": f"{type(e).__name__}: {e}"}
 
     def inference_dtype(self):
         """
@@ -165,6 +281,9 @@ class VideoAgent:
         fps: int = 8,
         style: str = "quetzal_diffusion",
         duration_seconds: Optional[float] = None,
+        lora_path: Optional[str] = None,
+        seed: Optional[int] = None,
+        num_inference_steps: int = 20,
     ) -> Dict[str, Any]:
         """
         Create a video clip using PyTorch SVD or Quetzal Engine.
@@ -190,7 +309,12 @@ class VideoAgent:
                 return {"success": False, "error": "duration_seconds must be positive"}
             num_frames = max(1, int(round(duration_seconds * fps)))
 
-        engine_key = "svd" if style in SVD_STYLES or os.environ.get("USE_PYTORCH_VIDEO") == "true" else "procedural"
+        if style in ANIMATEDIFF_STYLES:
+            engine_key = "animatediff"
+        elif style in SVD_STYLES or os.environ.get("USE_PYTORCH_VIDEO") == "true":
+            engine_key = "svd"
+        else:
+            engine_key = "procedural"
         frames_requested = num_frames
         clamp_note = None
         if engine_key == "svd" and num_frames > SVD_MAX_FRAMES:
@@ -214,9 +338,28 @@ class VideoAgent:
         enhanced_prompt = self.gemma.synthesize_aesthetic_prompt(prompt, style)
 
         frames = None
+        animatediff_error = None
+        animatediff_meta = None
+
+        if engine_key == "animatediff":
+            # Prompt-conditioned, and the prompt is used verbatim: the Gemma
+            # rewrite below is for the keyframe-based engines, and paraphrasing
+            # here would defeat the point of a prompt-following model.
+            ad = self.pytorch_video_engine.generate_animatediff(
+                prompt=prompt,
+                width=width, height=height, num_frames=num_frames,
+                num_inference_steps=num_inference_steps,
+                seed=seed, lora_path=lora_path,
+            )
+            if ad.get("success"):
+                frames = ad["frames"]
+                animatediff_meta = {k: v for k, v in ad.items() if k != "frames"}
+            else:
+                animatediff_error = ad.get("error")
+                logger.error("AnimateDiff unavailable, falling back: %s", animatediff_error)
 
         # Attempt PyTorch SVD Video Diffusion if requested or available
-        if engine_key == "svd":
+        if frames is None and engine_key == "svd":
             frames = self.pytorch_video_engine.generate_video_diffusion(
                 prompt=enhanced_prompt,
                 width=width,
@@ -252,11 +395,12 @@ class VideoAgent:
         web_path = f"/static/videos/{filename}"
 
         elapsed = round(time.time() - render_started, 2)
-        used_svd = bool(frames and self.pytorch_video_engine.initialized)
+        used_animatediff = animatediff_meta is not None
+        used_svd = bool(frames and not used_animatediff and self.pytorch_video_engine.initialized)
         # Record against the engine that actually ran, not the one requested, so
-        # a fallback to the procedural path cannot poison the diffusion estimate.
-        render_estimator.record("svd" if used_svd else "procedural",
-                                width, height, num_frames, elapsed)
+        # a fallback to the procedural path cannot poison a diffusion estimate.
+        actual_engine = "animatediff" if used_animatediff else ("svd" if used_svd else "procedural")
+        render_estimator.record(actual_engine, width, height, num_frames, elapsed)
 
         return {
             "success": True,
@@ -275,8 +419,15 @@ class VideoAgent:
             "estimate_basis": estimate.get("basis"),
             "render_seconds": elapsed,
             "style": style,
-            "engine": "PyTorch MPS Video Diffusion (Apple Silicon)" if (frames and self.pytorch_video_engine.initialized) else "Procedural animation placeholder (no video diffusion model loaded)",
-            "placeholder": not (frames and self.pytorch_video_engine.initialized),
+            "engine": (
+                "AnimateDiff (SD 1.5 motion module, prompt-conditioned)" if used_animatediff
+                else "PyTorch MPS Video Diffusion (Apple Silicon)" if used_svd
+                else "Procedural animation placeholder (no video diffusion model loaded)"
+            ),
+            "placeholder": not (used_animatediff or used_svd),
+            "actual_engine": actual_engine,
+            "lora": (animatediff_meta or {}).get("lora"),
+            "animatediff_error": animatediff_error,
             "file_path": filepath,
             "video_url": web_path,
         }

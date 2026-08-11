@@ -36,10 +36,14 @@ def fetch_model(args) -> dict:
     from huggingface_hub import snapshot_download
     destination = os.path.join(args.output_root, args.repo_id.replace("/", "__"))
     os.makedirs(destination, exist_ok=True)
+    # The Hub client defaults to 8 workers but shards are large and latency-bound,
+    # so more parallel connections is the single biggest win on a fast link.
+    # hf_transfer (Rust, multi-part per file) is used automatically when present.
     path = snapshot_download(
         repo_id=args.repo_id,
         local_dir=destination,
         allow_patterns=None if args.allow_unsafe else SAFE_MODEL_PATTERNS,
+        max_workers=int(os.environ.get("HF_DOWNLOAD_WORKERS", "16")),
     )
     return {"success": True, "kind": "model", "repo_id": args.repo_id, "path": path}
 

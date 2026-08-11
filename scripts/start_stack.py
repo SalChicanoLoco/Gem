@@ -151,17 +151,52 @@ def ensure_ollama(report, start=True, required=False):
     return True
 
 
+# Ports tried in order when the requested one cannot be freed.
+FALLBACK_PORTS = [5005, 5006, 5007, 5050, 8080]
+
+
 def free_ports(report, ports):
-    """Clear stale listeners so the API is not silently pushed to another port."""
+    """
+    Clear stale listeners so the API is not silently pushed to another port.
+
+    Returns a usable port, which may differ from the one requested: macOS AirPlay
+    Receiver holds port 5000 through ControlCenter, which must not be killed to
+    make way for a dev server. CleanHouse already refuses to touch it; this makes
+    the launcher move rather than fail.
+    """
+    requested = ports[0]
     try:
-        from scripts.cleanhouse import cleanhouse
+        from scripts.cleanhouse import cleanhouse, is_port_in_use
     except ImportError as e:
         report.add("ports", WARN, f"sweep unavailable: {e}")
-        return
-    result = cleanhouse(ports=ports)
+        return requested
+
+    candidates = list(dict.fromkeys(list(ports) + FALLBACK_PORTS))
+    result = cleanhouse(ports=candidates)
     cleaned = result.get("cleaned_processes") or []
-    detail = f"cleared {cleaned}" if cleaned else "no stale listeners"
-    report.add("ports", OK, detail)
+    protected = result.get("skipped_system_processes") or []
+
+    if not is_port_in_use(requested):
+        detail = f"{requested} ready" + (f", cleared {len(cleaned)} stale listener(s)" if cleaned else "")
+        report.add("ports", OK, detail)
+        return requested
+
+    holder = next((p for p in protected if p.get("port") == requested), None)
+    alternative = next((p for p in candidates if p != requested and not is_port_in_use(p)), None)
+
+    if alternative is None:
+        report.add("ports", FAIL,
+                   f"{requested} is in use and no fallback port is free (tried {candidates})")
+        return requested
+
+    if holder:
+        report.add("ports", WARN,
+                   f"{requested} is held by {holder['name']} (pid {holder['pid']}) and is a system "
+                   f"service, so it was left alone; using {alternative} instead")
+    else:
+        report.add("ports", WARN,
+                   f"{requested} could not be freed; using {alternative} instead")
+    return alternative
 
 
 def api_health(port):
@@ -255,9 +290,10 @@ def main(argv=None):
     report = Report()
     check_diffusion(report)
     ensure_ollama(report, start=starting, required=args.strict)
+    port = args.port
     if starting:
-        free_ports(report, [args.port])
-    health = ensure_api(report, args.port, start=starting)
+        port = free_ports(report, [args.port])
+    health = ensure_api(report, port, start=starting)
     if health is not None:
         check_chat(report, health)
 
@@ -276,10 +312,10 @@ def main(argv=None):
         print("The API did not come up. The stack is not usable.")
 
     if api_up:
-        print(f"  Dashboard : http://localhost:{args.port}/dashboard")
-        print(f"  Chat      : http://localhost:{args.port}/static/chat.html")
+        print(f"  Dashboard : http://localhost:{port}/dashboard")
+        print(f"  Chat      : http://localhost:{port}/static/chat.html")
         if not args.no_browser and not args.check:
-            subprocess.run(["open", f"http://localhost:{args.port}/dashboard"], check=False)
+            subprocess.run(["open", f"http://localhost:{port}/dashboard"], check=False)
 
     return 0 if ok else 1
 

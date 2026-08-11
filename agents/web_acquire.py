@@ -51,6 +51,12 @@ WORKER = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))
                       "scripts", "sandboxed_fetch.py")
 
 
+def _hf_transfer_available() -> bool:
+    """True when the accelerated Hub downloader is installed."""
+    import importlib.util
+    return importlib.util.find_spec("hf_transfer") is not None
+
+
 def _audit_containment(root: str) -> List[str]:
     """
     Paths under root that actually resolve outside it.
@@ -74,7 +80,13 @@ def _run_worker(argv: List[str], write_root: str, timeout: int = 1800) -> Dict[s
         [sys.executable, WORKER] + argv, write_root=write_root, timeout=timeout,
         # Keep the Hub's cache and temp files inside the writable root too,
         # otherwise the sandbox denies them and the download fails.
-        env={"HF_HUB_CACHE": os.path.join(write_root, ".hf-cache")},
+        env={
+            "HF_HUB_CACHE": os.path.join(write_root, ".hf-cache"),
+            # hf_transfer downloads each file in parallel chunks and is several
+            # times faster on a fast link. Enabled only when installed, because
+            # the flag makes huggingface_hub raise if the package is absent.
+            **({"HF_HUB_ENABLE_HF_TRANSFER": "1"} if _hf_transfer_available() else {}),
+        },
     )
 
     # The fetcher prints human-readable progress, so the result is the last line
