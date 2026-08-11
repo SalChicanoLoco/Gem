@@ -8,6 +8,7 @@ import os
 import time
 from flask import Flask, jsonify, request, send_from_directory, Response, stream_with_context, make_response
 
+from agents import runtime_load
 from agents import (
     ModelAgent,
     ImageAgent,
@@ -145,12 +146,13 @@ def create_app():
                 message = data.get("message") or data.get("prompt", "")
                 if not message.strip():
                     return jsonify({"success": False, "error": "message is required"}), 400
-                return jsonify(gemma_agent.chat(
-                    message,
-                    conversation_id=data.get("conversation_id", "default"),
-                    system=data.get("system"),
-                    temperature=data.get("temperature", 0.7),
-                ))
+                with runtime_load.track("chat"):
+                    return jsonify(gemma_agent.chat(
+                        message,
+                        conversation_id=data.get("conversation_id", "default"),
+                        system=data.get("system"),
+                        temperature=data.get("temperature", 0.7),
+                    ))
 
             elif action == "history":
                 cid = data.get("conversation_id", "default")
@@ -951,18 +953,19 @@ def create_app():
             quality_preset = data.get("quality_preset", False)
             lora_path = data.get("lora_path")
             seed = data.get("seed")
-            return jsonify(image_agent.diffusion_engine.generate(
-                prompt=prompt,
-                width=width,
-                height=height,
-                num_inference_steps=num_steps,
-                negative_prompt=neg_prompt,
-                raw_mode=raw_mode,
-                model_id=model_id,
-                quality_preset=quality_preset,
-                lora_path=lora_path,
-                seed=seed,
-            ))
+            with runtime_load.track("diffusion"):
+                return jsonify(image_agent.diffusion_engine.generate(
+                    prompt=prompt,
+                    width=width,
+                    height=height,
+                    num_inference_steps=num_steps,
+                    negative_prompt=neg_prompt,
+                    raw_mode=raw_mode,
+                    model_id=model_id,
+                    quality_preset=quality_preset,
+                    lora_path=lora_path,
+                    seed=seed,
+                ))
         except Exception as e:
             return jsonify({"success": False, "error": str(e)}), 500
 
@@ -1039,19 +1042,43 @@ def create_app():
         """
         Dashboard data endpoint for frontend load gauge and metrics.
 
-        Returns:
-            JSON with complete dashboard data including load gauge.
+        The gauge reports real process load. It used to report the orchestrator's
+        queue, which nothing enqueues to, so it sat at 0% throughout a render.
+        Queue figures are still included under `queue`, they are simply no longer
+        what the gauge shows.
         """
-        return jsonify(orchestrator.get_system_dashboard())
+        data = orchestrator.get_system_dashboard()
+        live = runtime_load.snapshot()
+        data["queue"] = {"load_gauge": data.get("load_gauge"), "metrics": data.get("metrics")}
+        data["load_gauge"] = {
+            "score": live["score"],
+            "level": live["level"],
+            "color": live["color"],
+            "percentage": live["score"],
+        }
+        data["metrics"] = {**(data.get("metrics") or {}), **{
+            "in_flight": live["in_flight"],
+            "in_flight_by_kind": live["in_flight_by_kind"],
+            "longest_running_seconds": live["longest_running_seconds"],
+            "cpu_percent": live["cpu_percent"],
+            "memory_mb": live["memory_mb"],
+            "memory_percent": live["memory_percent"],
+        }}
+        return jsonify(data)
 
     @app.route("/api/load", methods=["GET"])
     def load_metrics():
         """
-        Load metrics endpoint for real-time gauge updates.
+        Real-time load for the gauge.
 
-        Returns:
-            JSON with load gauge data and metrics.
+        This previously had a docstring and no return statement, so Flask raised
+        on every call: the endpoint was advertised in the index and answered 500.
         """
+        return jsonify({
+            "success": True,
+            "load": runtime_load.snapshot(),
+            "queue": orchestrator.get_load_metrics(),
+        })
     @app.after_request
     def add_no_cache_headers(response):
         """Ensure static files and HTML pages are never cached by the browser."""
@@ -1071,17 +1098,6 @@ def create_app():
             res = visual_trainer.run_full_model_training(
                 training_dir=training_dir, max_steps=max_steps, learning_rate=lr
             )
-            return jsonify(res)
-        except Exception as e:
-            return jsonify({"success": False, "error": str(e)}), 500
-
-    @app.route("/api/trainer/subject", methods=["POST"])
-    def trainer_subject_api():
-        """Auto-fetch dataset & fine-tune model weights for a specific subject (e.g. roadrunner)."""
-        try:
-            data = request.get_json() or {}
-            subject = data.get("subject", "roadrunner")
-            res = visual_trainer.fetch_and_train_subject(subject_name=subject)
             return jsonify(res)
         except Exception as e:
             return jsonify({"success": False, "error": str(e)}), 500

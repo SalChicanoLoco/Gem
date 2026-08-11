@@ -624,20 +624,20 @@
 
                         <div class="metrics-grid">
                             <div class="metric">
-                                <div class="metric-value" id="agentUtil">0%</div>
-                                <div class="metric-label">Agent Utilization</div>
+                                <div class="metric-value" id="inFlight">0</div>
+                                <div class="metric-label">Requests In Flight</div>
                             </div>
                             <div class="metric">
-                                <div class="metric-value" id="queuePressure">0%</div>
-                                <div class="metric-label">Queue Pressure</div>
+                                <div class="metric-value" id="cpuPercent">–</div>
+                                <div class="metric-label">Process CPU</div>
                             </div>
                             <div class="metric">
-                                <div class="metric-value" id="throughput">0</div>
-                                <div class="metric-label">Tasks/Min</div>
+                                <div class="metric-value" id="memoryMb">–</div>
+                                <div class="metric-label">Memory (MB)</div>
                             </div>
                             <div class="metric">
-                                <div class="metric-value" id="completedCount">0</div>
-                                <div class="metric-label">Completed Tasks</div>
+                                <div class="metric-value" id="longestRunning">0s</div>
+                                <div class="metric-label">Longest Running</div>
                             </div>
                         </div>
                     </div>
@@ -768,14 +768,6 @@
                     <span style="font-size:0.75rem; color:var(--text-secondary);">Bypasses all automatic prompt expansions & subject locks for total raw artistic freedom.</span>
                 </div>
 
-                <div style="margin-bottom:1rem; background:rgba(30,41,59,0.5); padding:0.75rem; border-radius:0.5rem; border:1px solid var(--glass-border);">
-                    <label style="font-size:0.85rem; font-weight:600; color:var(--accent-cyan);">🦅 Fine-Tune Subject Anatomy & Model Weights (e.g. Roadrunner, Quetzal)</label>
-                    <div style="display:flex; gap:0.5rem; margin-top:0.35rem;">
-                        <input type="text" id="trainerSubjectInput" value="roadrunner" placeholder="Subject name (e.g. roadrunner, quetzal, wolf)">
-                        <button class="btn btn-cyan" onclick="runSubjectTrainer()">🦅 Ingest & Fine-Tune Subject</button>
-                    </div>
-                </div>
-
                 <div style="display:flex; gap:0.5rem;">
                     <button class="btn btn-pink" onclick="runPhotorealImage()">✨ Render Photorealistic Image (MPS GPU)</button>
                     <button class="btn btn-secondary" onclick="autoEnhancePhotoPrompt()">🧠 Gemma Auto-Enhance Prompt</button>
@@ -787,7 +779,7 @@
                         <div style="padding:1.5rem; border:2px dashed var(--glass-border); border-radius:0.75rem; color:var(--text-secondary); background:rgba(15,23,42,0.4);">
                             <div style="font-size:2rem; margin-bottom:0.5rem;">📸</div>
                             <div style="font-weight:600; color:var(--text-primary);">PyTorch MPS Studio Canvas Ready</div>
-                            <div style="font-size:0.8rem; margin-top:0.25rem;">Click '✨ Render Photorealistic Image (MPS GPU)' or '🦅 Ingest & Fine-Tune Subject' to generate custom artwork.</div>
+                            <div style="font-size:0.8rem; margin-top:0.25rem;">Click '✨ Render Photorealistic Image (MPS GPU)' to generate an image.</div>
                         </div>
                     </div>
                 </div>
@@ -1089,10 +1081,17 @@
         }
 
         function updateMetrics(metrics) {
-            document.getElementById('agentUtil').textContent = `${metrics.agent_utilization}%`;
-            document.getElementById('queuePressure').textContent = `${metrics.queue_pressure}%`;
-            document.getElementById('throughput').textContent = metrics.throughput_per_minute;
-            document.getElementById('completedCount').textContent = metrics.completed_tasks;
+            // Real process load. These replaced agent utilisation, queue pressure,
+            // tasks/min and completed tasks, all of which read from a task queue
+            // that nothing in the app enqueues to and so were permanently zero.
+            const dash = v => (v === null || v === undefined) ? '–' : v;
+            document.getElementById('inFlight').textContent = dash(metrics.in_flight);
+            document.getElementById('cpuPercent').textContent =
+                metrics.cpu_percent === null || metrics.cpu_percent === undefined
+                    ? '–' : `${metrics.cpu_percent}%`;
+            document.getElementById('memoryMb').textContent = dash(metrics.memory_mb);
+            document.getElementById('longestRunning').textContent =
+                `${dash(metrics.longest_running_seconds)}s`;
         }
 
         function updateAgents(agents) {
@@ -1265,27 +1264,48 @@
                 });
                 const data = await res.json();
                 
+                // Report the stages the run actually reported.
+                //
+                // This loop used to mark all four "✅ Evolved" unconditionally,
+                // before looking at the response, so a cycle that did nothing (or
+                // was blocked by the BoundaryGuard) still lit up green. The summary
+                // then filled every missing field with an invented value: a "3.4x
+                // throughput speedup" that nothing measured — the same figure
+                // e034558 deleted from the backend — plus "Completed", "Approved"
+                // and a tool filename. Absent data now reads as absent.
+                const report = data.evolution_report || {};
+                const stages = report.stages || {};
+                const stageKeys = ['gemma_optimization', 'tool_synthesized', 'debate_consensus', 'auto_healer_status'];
+
                 for (let i = 1; i <= 4; i++) {
                     const card = document.getElementById(`evoStage${i}`);
                     const status = document.getElementById(`evoStage${i}Status`);
-                    if (card) { card.className = 'evo-stage-card done'; }
-                    if (status) { status.textContent = '✅ Evolved'; status.style.color = 'var(--success)'; }
+                    const value = stages[stageKeys[i - 1]];
+                    const ran = value !== undefined && value !== null;
+                    if (card) { card.className = ran ? 'evo-stage-card done' : 'evo-stage-card'; }
+                    if (status) {
+                        status.textContent = ran ? '✅ Ran' : '— not reported';
+                        status.style.color = ran ? 'var(--success)' : 'var(--text-secondary)';
+                    }
                 }
 
-                const report = data.evolution_report || {};
+                const show = v => (v === undefined || v === null) ? 'not reported' : JSON.stringify(v);
                 const summaryText = (
-                    `Cycle ID: ${data.cycle_id || 'evo_active'}\n` +
-                    `Status: EVOLVED (Efficiency Gain: ${report.efficiency_gain || '3.4x throughput speedup'})\n\n` +
-                    `Stage 1 Gemma Optimization: ${JSON.stringify(report.stages?.gemma_optimization || 'Completed')}\n` +
-                    `Stage 2 Synthesized Tool: ${report.stages?.tool_synthesized || 'evo_tool.py'}\n` +
-                    `Stage 3 Debate Consensus: ${report.stages?.debate_consensus || 'Approved'}\n` +
-                    `Stage 4 AutoHealer Status: Verified (${report.stages?.auto_healer_status ? 'Passed' : 'Repaired'})\n\n` +
+                    `Cycle ID: ${data.cycle_id || 'not reported'}\n` +
+                    `Success: ${data.success}\n` +
+                    `Efficiency gain: ${report.efficiency_gain === undefined ? 'not measured' : report.efficiency_gain}\n\n` +
+                    `Stage 1 Gemma optimization: ${show(stages.gemma_optimization)}\n` +
+                    `Stage 2 Synthesized tool:   ${show(stages.tool_synthesized)}\n` +
+                    `Stage 3 Debate consensus:   ${show(stages.debate_consensus)}\n` +
+                    `Stage 4 AutoHealer status:  ${show(stages.auto_healer_status)}\n\n` +
                     `Full Execution Report:\n` + JSON.stringify(data, null, 2)
                 );
                 consoleBox.textContent = summaryText;
 
                 if (document.getElementById('autoTTSCheck')?.checked) {
-                    speakText(`Autonomous evolution cycle completed successfully for ${goal.substring(0, 40)}. Efficiency speedup 3.4x achieved.`);
+                    speakText(data.success === false
+                        ? `Evolution cycle failed for ${goal.substring(0, 40)}.`
+                        : `Evolution cycle finished for ${goal.substring(0, 40)}. See the console for what each stage reported.`);
                 }
             } catch (err) {
                 consoleBox.textContent = `[Evolution Error] ${err.message}`;
@@ -1347,34 +1367,6 @@
                 }
             } catch (err) {
                 consoleBox.textContent = `[Ingest Error] ${err.message}`;
-            }
-        }
-
-        async function runSubjectTrainer() {
-            const subject = document.getElementById('trainerSubjectInput')?.value || 'roadrunner';
-            const consoleBox = document.getElementById('photoConsole') || document.getElementById('trainerConsole');
-
-            if (consoleBox) consoleBox.textContent = `[Subject Trainer] Fetching reference dataset & fine-tuning model weights for "${subject}"...`;
-
-            try {
-                const res = await fetch(`${API_BASE}/api/trainer/subject`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ subject: subject })
-                });
-                const data = await res.json();
-                if (consoleBox) consoleBox.textContent = JSON.stringify(data, null, 2);
-
-                if (document.getElementById('autoTTSCheck')?.checked) {
-                    speakText(`Successfully fine-tuned model weights for ${subject}. Re-rendering image...`);
-                }
-
-                const photoInput = document.getElementById('photoPrompt');
-                if (photoInput && photoInput.value.includes(subject)) {
-                    runPhotorealImage();
-                }
-            } catch (err) {
-                if (consoleBox) consoleBox.textContent = `[Subject Trainer Error] ${err.message}`;
             }
         }
 
