@@ -6,7 +6,7 @@ Run directly from terminal: python cli.py
 
 import sys
 import argparse
-from agents import GemmaAgent, ModelAgent, OrchestratorAgent, TaskPriority
+from agents import GemmaAgent, ModelAgent, OrchestratorAgent, TaskPriority, configure_logging
 
 
 def interactive_chat(agent: GemmaAgent):
@@ -54,6 +54,7 @@ def main():
     parser.add_argument("--prompt", type=str, help="Single-shot prompt execution")
     args = parser.parse_args()
 
+    configure_logging()
     agent = GemmaAgent(model_name=args.model)
 
     if args.prompt:

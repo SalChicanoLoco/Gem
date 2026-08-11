@@ -14,6 +14,11 @@ sys.path.insert(0, project_root)
 # Set PYTHONPATH environment variable for subprocess compatibility
 os.environ['PYTHONPATH'] = project_root + os.pathsep + os.environ.get('PYTHONPATH', '')
 
+# Without this the agents' logger.info calls are discarded and their warnings
+# arrive unformatted, so the server gives no account of what it is doing.
+from agents.logging_config import configure_logging
+configure_logging()
+
 # Run CleanHouse Pre-Flight Sweep
 try:
     from scripts.cleanhouse import cleanhouse

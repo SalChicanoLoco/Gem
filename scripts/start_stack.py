@@ -34,8 +34,12 @@ REQUIRED_MODEL = os.environ.get("GEMMA_MODEL", "gemma2:2b")
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LOG_DIR = os.path.join(REPO_ROOT, "logs")
 
-OK, WARN, FAIL = "ok", "warn", "fail"
-_MARK = {OK: "  ok  ", WARN: " warn ", FAIL: " FAIL "}
+OK, WARN, FAIL, STEP = "ok", "warn", "fail", "step"
+_MARK = {OK: "  ok  ", WARN: " warn ", FAIL: " FAIL ", STEP: "  ..  "}
+
+# STEP lines narrate progress ("starting X") and are deliberately excluded from
+# the verdict: beginning to start something is not evidence that it came up.
+_VERDICT_STATES = (OK, WARN, FAIL)
 
 
 class Report:
@@ -49,8 +53,11 @@ class Report:
         print(f"[{_MARK[state]}] {component:<22} {detail}")
         return state
 
+    def step(self, component, detail=""):
+        return self.add(component, STEP, detail)
+
     def worst(self):
-        states = {state for _, state, _ in self.rows}
+        states = {s for _, s, _ in self.rows if s in _VERDICT_STATES}
         if FAIL in states:
             return FAIL
         return WARN if WARN in states else OK
@@ -106,29 +113,37 @@ def start_ollama(log_dir=LOG_DIR):
     return log_path
 
 
-def ensure_ollama(report, start=True):
-    """Make the local model server reachable, and confirm the model is pulled."""
+def ensure_ollama(report, start=True, required=False):
+    """
+    Make the local model server reachable, and confirm the model is pulled.
+
+    Severity depends on `required`: without it a missing model server is a
+    warning, because diffusion works fine without one and the stack is degraded
+    rather than broken. Under --strict it is a failure. Reporting it as a failure
+    either way made the exit code contradict the summary text.
+    """
+    unmet = FAIL if required else WARN
     models = ollama_models()
 
     if models is None and start:
         try:
             log_path = start_ollama()
         except FileNotFoundError:
-            report.add("ollama", FAIL,
+            report.add("ollama", unmet,
                        "not installed - `brew install ollama`; chat will be unavailable")
             return False
-        report.add("ollama", OK, f"starting, logging to {os.path.relpath(log_path, REPO_ROOT)}")
+        report.step("ollama", f"starting, logging to {os.path.relpath(log_path, REPO_ROOT)}")
         models = wait_until(ollama_models, timeout=20)
 
     if models is None:
-        report.add("ollama", FAIL, f"not reachable at {OLLAMA_HOST}; chat will be unavailable")
+        report.add("ollama", unmet, f"not reachable at {OLLAMA_HOST}; chat will be unavailable")
         return False
 
     report.add("ollama", OK, f"serving at {OLLAMA_HOST}")
 
     if not any(REQUIRED_MODEL in name for name in models):
         have = ", ".join(models) or "none"
-        report.add("model", FAIL,
+        report.add("model", unmet,
                    f"{REQUIRED_MODEL} not pulled (have: {have}) - run `ollama pull {REQUIRED_MODEL}`")
         return False
 
@@ -177,7 +192,7 @@ def ensure_api(report, port, start=True, timeout=90):
     if health is None and start:
         proc, log_path = start_api(port)
         rel = os.path.relpath(log_path, REPO_ROOT)
-        report.add("api", OK, f"starting on :{port}, logging to {rel}")
+        report.step("api", f"starting on :{port}, logging to {rel}")
         health = wait_until(lambda: api_health(port), timeout=timeout, interval=1.0)
         if health is None and proc.poll() is not None:
             report.add("api", FAIL, f"process exited with code {proc.returncode}; see {rel}")
@@ -229,6 +244,9 @@ def main(argv=None):
     parser.add_argument("--no-browser", action="store_true", help="do not open the dashboard")
     args = parser.parse_args(argv)
 
+    from agents.logging_config import configure_logging
+    configure_logging()
+
     starting = not args.check
     print("=" * 64)
     print("  SenaAIgent stack " + ("check" if args.check else "startup"))
@@ -236,7 +254,7 @@ def main(argv=None):
 
     report = Report()
     check_diffusion(report)
-    chat_ready = ensure_ollama(report, start=starting)
+    ensure_ollama(report, start=starting, required=args.strict)
     if starting:
         free_ports(report, [args.port])
     health = ensure_api(report, args.port, start=starting)
@@ -246,7 +264,9 @@ def main(argv=None):
     print("-" * 64)
     worst = report.worst()
     api_up = health is not None
-    ok = api_up and (chat_ready or not args.strict) and worst != FAIL
+    # Severity already encodes whether a missing component is fatal, so the
+    # verdict is simply: the API answered, and nothing reported a failure.
+    ok = api_up and worst != FAIL
 
     if api_up and worst == OK:
         print("All components up.")
