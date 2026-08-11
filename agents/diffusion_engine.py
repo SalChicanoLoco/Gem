@@ -436,18 +436,49 @@ class PyTorchDiffusionEngine:
                 elapsed = round(time.time() - start_time, 2)
 
                 blank = _is_blank(image)
+                recovered_in_float32 = False
+                if blank and self.active_dtype == torch.float16 and not self.dtype_override:
+                    # Half-precision blanking is intermittent, not just size-gated:
+                    # a real 512x512 render blanked in float16 on a prompt that had
+                    # rendered fine at other times. Rules that try to predict it
+                    # will always miss cases, so detect and recover instead. The
+                    # float32 cost is only paid on the failures.
+                    logger.warning(
+                        "Blank render in float16 for %r; retrying once in float32.", prompt[:60])
+                    self.dtype_override = "float32"
+                    try:
+                        self.initialized = False
+                        self.pipe = None
+                        if self.initialize_pipeline(width=width, height=height):
+                            retry = self.pipe(
+                                prompt=final_prompt,
+                                negative_prompt=active_neg_prompt,
+                                width=width,
+                                height=height,
+                                num_inference_steps=steps_used,
+                                guidance_scale=guidance_scale,
+                                generator=torch.Generator(device="cpu").manual_seed(active_seed)
+                                if TORCH_AVAILABLE else None,
+                            )
+                            candidate = retry.images[0]
+                            if not _is_blank(candidate):
+                                image = candidate
+                                image.save(filepath)
+                                blank = False
+                                recovered_in_float32 = True
+                                elapsed = round(time.time() - start_time, 2)
+                                logger.info("float32 retry produced a valid image for %r.", prompt[:60])
+                    finally:
+                        # Leave the engine on its normal default; the next request
+                        # should not silently inherit float32 from one bad render.
+                        self.dtype_override = None
+
                 if blank:
-                    hint = ""
-                    if self._inference_dtype() == torch.float16:
-                        hint = (
-                            f" This model may be unstable in half precision; retry with "
-                            f"dtype='float32' (or $DIFFUSION_DTYPE=float32), and consider adding "
-                            f"{self.model_id!r} to FP16_UNSTABLE_ON_MPS."
-                        )
                     logger.error(
-                        "Render for %r produced a blank image (model=%s, dtype=%s, safety_checker=%s). "
-                        "Reported as blank_image rather than as a successful render.%s",
-                        prompt[:60], self.model_id, self._inference_dtype(), self.safety_checker, hint,
+                        "Render for %r produced a blank image (model=%s, dtype=%s, safety_checker=%s), "
+                        "and the float32 retry did not help. Reported as blank_image rather than as a "
+                        "successful render.",
+                        prompt[:60], self.model_id, self.active_dtype, self.safety_checker,
                     )
 
                 # Convert to Base64
