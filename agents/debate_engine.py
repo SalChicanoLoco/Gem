@@ -64,27 +64,61 @@ class DebateEngine:
                     f"Provide your assessment as {persona_name}. State key risks, score (0-100), and verdict (APPROVED/REJECTED)."
                 )
                 response = self.gemma.generate(prompt, system=persona_sys, temperature=0.5)
-                verdict = "APPROVED" if "approve" in response.lower() else "REJECTED"
                 round_feedback[persona_name] = {
                     "response": response,
-                    "verdict": verdict,
+                    "verdict": self._read_verdict(response),
                 }
             transcript.append({"round": r + 1, "feedback": round_feedback})
 
-        # Calculate final consensus score
         all_verdicts = [fb["verdict"] for r_data in transcript for fb in r_data["feedback"].values()]
-        approval_rate = all_verdicts.count("APPROVED") / len(all_verdicts) if all_verdicts else 1.0
+        decided = [v for v in all_verdicts if v in ("APPROVED", "REJECTED")]
 
+        # No debate means no consensus. Defaulting an empty debate to 1.0 reported
+        # unanimous approval for a run in which nobody was asked anything.
+        if not decided:
+            return {
+                "success": False,
+                "topic": topic,
+                "rounds_conducted": rounds,
+                "error": "no persona returned a readable verdict; there is no consensus to report",
+                "transcript": transcript,
+            }
+
+        approval_rate = decided.count("APPROVED") / len(decided)
         consensus_verdict = "APPROVED" if approval_rate >= 0.6 else "REJECTED"
+        unreadable = len(all_verdicts) - len(decided)
 
         return {
             "success": True,
             "topic": topic,
             "rounds_conducted": rounds,
             "approval_rate": round(approval_rate * 100, 2),
+            "verdicts_counted": len(decided),
+            "verdicts_unreadable": unreadable,
             "final_verdict": consensus_verdict,
             "transcript": transcript,
             "consensus_summary": (
-                f"Multi-Agent Consensus Verdict: {consensus_verdict} ({round(approval_rate * 100)}% approval across personas)."
+                f"{consensus_verdict} on {round(approval_rate * 100)}% approval across "
+                f"{len(decided)} readable verdict(s)"
+                + (f"; {unreadable} response(s) stated no verdict." if unreadable else ".")
             ),
         }
+
+    @staticmethod
+    def _read_verdict(response: str) -> str:
+        """
+        Read a persona's verdict from its reply.
+
+        A substring test for "approve" was previously enough to count a verdict as
+        APPROVED, so "I cannot approve this" was recorded as approval. Negations
+        are checked first, and a reply that states neither is UNCLEAR rather than
+        being silently counted as a rejection.
+        """
+        text = (response or "").lower()
+        rejected_markers = ("rejected", "reject", "not approve", "cannot approve",
+                            "can't approve", "do not approve", "disapprove")
+        if any(marker in text for marker in rejected_markers):
+            return "REJECTED"
+        if "approved" in text or "approve" in text:
+            return "APPROVED"
+        return "UNCLEAR"

@@ -3,15 +3,19 @@ SenaAIgent API - Flask application with endpoints for ML analytics, image genera
 aesthetic analysis, and agent orchestration.
 """
 
+import json
 import os
 import time
 from flask import Flask, jsonify, request, send_from_directory, Response, stream_with_context, make_response
 
+from agents import power, render_estimator, runtime_load, sandbox, web_acquire
+from agents import video_agent as video_agent_module
 from agents import (
     ModelAgent,
     ImageAgent,
     ArtAgent,
     GemmaAgent,
+    GemmaUnavailable,
     VideoAgent,
     CoderAgent,
     AutoHealer,
@@ -139,6 +143,31 @@ def create_app():
                     "response": response,
                 })
 
+            elif action == "chat":
+                message = data.get("message") or data.get("prompt", "")
+                if not message.strip():
+                    return jsonify({"success": False, "error": "message is required"}), 400
+                with runtime_load.track("chat"):
+                    return jsonify(gemma_agent.chat(
+                        message,
+                        conversation_id=data.get("conversation_id", "default"),
+                        system=data.get("system"),
+                        temperature=data.get("temperature", 0.7),
+                    ))
+
+            elif action == "history":
+                cid = data.get("conversation_id", "default")
+                return jsonify({
+                    "success": True,
+                    "conversation_id": cid,
+                    "messages": gemma_agent.conversations.get(cid),
+                })
+
+            elif action == "reset":
+                cid = data.get("conversation_id", "default")
+                gemma_agent.conversations.reset(cid)
+                return jsonify({"success": True, "conversation_id": cid, "messages": []})
+
             elif action == "analyze_telemetry":
                 telemetry = data.get("telemetry", {})
                 result = gemma_agent.analyze_telemetry(telemetry)
@@ -162,14 +191,19 @@ def create_app():
         Live SSE Text Streaming Endpoint.
         Streams Gemma token responses word-by-word via Server-Sent Events.
         """
-        prompt = request.args.get("prompt") or (request.get_json() or {}).get("prompt", "Hello Gemma")
+        body = request.get_json(silent=True) or {}
+        prompt = request.args.get("prompt") or body.get("message") or body.get("prompt", "Hello Gemma")
+        conversation_id = request.args.get("conversation_id") or body.get("conversation_id", "default")
 
         def generate_sse():
-            full_response = gemma_agent.generate(prompt)
-            words = full_response.split(" ")
-            for word in words:
-                yield f"data: {word} \n\n"
-                time.sleep(0.04)
+            # Chunks are forwarded as the model emits them. Payloads are JSON so a
+            # token containing a newline cannot truncate the SSE frame, and so an
+            # error can be delivered as an error instead of as chat text.
+            try:
+                for piece in gemma_agent.chat_stream(prompt, conversation_id=conversation_id):
+                    yield f"data: {json.dumps({'token': piece})}\n\n"
+            except GemmaUnavailable as e:
+                yield f"data: {json.dumps({'error': str(e)})}\n\n"
             yield "data: [DONE]\n\n"
 
         return Response(stream_with_context(generate_sse()), content_type="text/event-stream")
@@ -206,6 +240,27 @@ def create_app():
             num_frames = int(data.get("num_frames", 16))
             fps = int(data.get("fps", 8))
             style = data.get("style", "quetzal_diffusion")
+            duration_seconds = data.get("duration_seconds")
+
+            # action=estimate answers "how long will this take" without rendering,
+            # from measurements of previous runs on this machine.
+            if data.get("action") == "estimate":
+                frames = (max(1, int(round(float(duration_seconds) * fps)))
+                          if duration_seconds else num_frames)
+                engine_key = ("svd" if style in video_agent_module.SVD_STYLES
+                              or os.environ.get("USE_PYTORCH_VIDEO") == "true" else "procedural")
+                clamped = min(frames, video_agent_module.SVD_MAX_FRAMES) if engine_key == "svd" else frames
+                estimate = render_estimator.estimate(engine_key, width, height, clamped)
+                return jsonify({
+                    "success": True,
+                    "engine": engine_key,
+                    "frames_requested": frames,
+                    "frames_used": clamped,
+                    "frames_clamped": clamped != frames,
+                    "fps": fps,
+                    "clip_seconds": round(clamped / max(1, fps), 2),
+                    **estimate,
+                })
 
             result = video_agent.create_clip(
                 prompt=prompt,
@@ -214,6 +269,7 @@ def create_app():
                 num_frames=num_frames,
                 fps=fps,
                 style=style,
+                duration_seconds=float(duration_seconds) if duration_seconds else None,
             )
             return jsonify(result)
 
@@ -919,17 +975,20 @@ def create_app():
             model_id = data.get("model_id")
             quality_preset = data.get("quality_preset", False)
             lora_path = data.get("lora_path")
-            return jsonify(image_agent.diffusion_engine.generate(
-                prompt=prompt,
-                width=width,
-                height=height,
-                num_inference_steps=num_steps,
-                negative_prompt=neg_prompt,
-                raw_mode=raw_mode,
-                model_id=model_id,
-                quality_preset=quality_preset,
-                lora_path=lora_path,
-            ))
+            seed = data.get("seed")
+            with runtime_load.track("diffusion"):
+                return jsonify(image_agent.diffusion_engine.generate(
+                    prompt=prompt,
+                    width=width,
+                    height=height,
+                    num_inference_steps=num_steps,
+                    negative_prompt=neg_prompt,
+                    raw_mode=raw_mode,
+                    model_id=model_id,
+                    quality_preset=quality_preset,
+                    lora_path=lora_path,
+                    seed=seed,
+                ))
         except Exception as e:
             return jsonify({"success": False, "error": str(e)}), 500
 
@@ -1006,19 +1065,43 @@ def create_app():
         """
         Dashboard data endpoint for frontend load gauge and metrics.
 
-        Returns:
-            JSON with complete dashboard data including load gauge.
+        The gauge reports real process load. It used to report the orchestrator's
+        queue, which nothing enqueues to, so it sat at 0% throughout a render.
+        Queue figures are still included under `queue`, they are simply no longer
+        what the gauge shows.
         """
-        return jsonify(orchestrator.get_system_dashboard())
+        data = orchestrator.get_system_dashboard()
+        live = runtime_load.snapshot()
+        data["queue"] = {"load_gauge": data.get("load_gauge"), "metrics": data.get("metrics")}
+        data["load_gauge"] = {
+            "score": live["score"],
+            "level": live["level"],
+            "color": live["color"],
+            "percentage": live["score"],
+        }
+        data["metrics"] = {**(data.get("metrics") or {}), **{
+            "in_flight": live["in_flight"],
+            "in_flight_by_kind": live["in_flight_by_kind"],
+            "longest_running_seconds": live["longest_running_seconds"],
+            "cpu_percent": live["cpu_percent"],
+            "memory_mb": live["memory_mb"],
+            "memory_percent": live["memory_percent"],
+        }}
+        return jsonify(data)
 
     @app.route("/api/load", methods=["GET"])
     def load_metrics():
         """
-        Load metrics endpoint for real-time gauge updates.
+        Real-time load for the gauge.
 
-        Returns:
-            JSON with load gauge data and metrics.
+        This previously had a docstring and no return statement, so Flask raised
+        on every call: the endpoint was advertised in the index and answered 500.
         """
+        return jsonify({
+            "success": True,
+            "load": runtime_load.snapshot(),
+            "queue": orchestrator.get_load_metrics(),
+        })
     @app.after_request
     def add_no_cache_headers(response):
         """Ensure static files and HTML pages are never cached by the browser."""
@@ -1042,16 +1125,90 @@ def create_app():
         except Exception as e:
             return jsonify({"success": False, "error": str(e)}), 500
 
-    @app.route("/api/trainer/subject", methods=["POST"])
-    def trainer_subject_api():
-        """Auto-fetch dataset & fine-tune model weights for a specific subject (e.g. roadrunner)."""
+    @app.route("/api/acquire", methods=["GET", "POST"])
+    def acquire_api():
+        """
+        Experimental: fetch openly-licensed photos and open-source model weights.
+
+        Downloads run in a subprocess confined to downloads/quarantine, fetch data
+        rather than code, and are never loaded or executed here. Moving anything
+        out of quarantine is a separate, explicit `promote` call.
+        """
+        if request.method == "GET":
+            return jsonify({
+                "endpoint": "/api/acquire",
+                "status": "experimental",
+                "sandbox_available": sandbox.available(),
+                "actions": {
+                    "search_images": "Search Wikimedia Commons; downloads nothing",
+                    "download_images": "Download licensed photos into quarantine",
+                    "search_models": "Search the Hugging Face Hub; downloads nothing",
+                    "inspect_model": "List a repo's files and sizes before fetching",
+                    "download_model": "Download weights into quarantine (safetensors by default)",
+                    "list_quarantine": "What is currently quarantined",
+                    "promote": "Move a vetted download out of quarantine",
+                },
+            })
+
         try:
             data = request.get_json() or {}
-            subject = data.get("subject", "roadrunner")
-            res = visual_trainer.fetch_and_train_subject(subject_name=subject)
-            return jsonify(res)
+            action = data.get("action", "")
+
+            if action == "search_images":
+                return jsonify(web_acquire.search_images(data.get("query", ""), data.get("limit", 10)))
+            if action == "download_images":
+                with runtime_load.track("download"):
+                    return jsonify(web_acquire.download_images(
+                        subject=data.get("subject", ""),
+                        query=data.get("query", ""),
+                        limit=data.get("limit", 20),
+                        caption=data.get("caption"),
+                    ))
+            if action == "search_models":
+                return jsonify(web_acquire.search_models(data.get("query", ""), data.get("limit", 10)))
+            if action == "inspect_model":
+                return jsonify(web_acquire.inspect_model(data.get("repo_id", "")))
+            if action == "download_model":
+                with runtime_load.track("download"):
+                    return jsonify(web_acquire.download_model(
+                        repo_id=data.get("repo_id", ""),
+                        allow_unsafe=bool(data.get("allow_unsafe", False)),
+                        max_gb=float(data.get("max_gb", web_acquire.DEFAULT_MAX_MODEL_GB)),
+                    ))
+            if action == "list_quarantine":
+                return jsonify(web_acquire.list_quarantine())
+            if action == "promote":
+                return jsonify(web_acquire.promote(
+                    data.get("relative_path", ""),
+                    data.get("destination_root", "checkpoints"),
+                ))
+
+            return jsonify({"success": False, "error": f"Unknown action: {action!r}"}), 400
         except Exception as e:
             return jsonify({"success": False, "error": str(e)}), 500
+
+    @app.route("/api/power", methods=["GET", "POST"])
+    def power_api():
+        """
+        Master switch for the AI stack.
+
+        GET reports measured state. POST with action on/off/status drives it. The
+        web server is deliberately outside the switch's scope: it serves the page
+        the switch lives on.
+        """
+        engines = [image_agent.diffusion_engine, video_agent.pytorch_video_engine]
+        if request.method == "GET":
+            return jsonify(power.status(engines))
+
+        data = request.get_json(silent=True) or {}
+        action = data.get("action", "status")
+        if action == "on":
+            return jsonify(power.power_on(engines))
+        if action == "off":
+            return jsonify(power.power_off(engines))
+        if action == "status":
+            return jsonify(power.status(engines))
+        return jsonify({"success": False, "error": f"Unknown action: {action!r}"}), 400
 
     @app.route("/dashboard")
     def dashboard_page():

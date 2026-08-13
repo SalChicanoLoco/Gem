@@ -86,6 +86,18 @@ class DistributedClusterManager:
         active_nodes = self.get_active_nodes()
         results = []
 
+        # With no reachable node every job divided by zero and failed, while the
+        # summary still reported success: True over a list of failures.
+        if not active_nodes:
+            return {
+                "success": False,
+                "error": "no cluster node is reachable; nothing was dispatched",
+                "total_prompts": len(prompts),
+                "cluster_nodes_utilized": 0,
+                "elapsed_seconds": round(time.time() - start_time, 2),
+                "batch_results": [],
+            }
+
         def worker_job(prompt_idx_tuple):
             idx, prompt = prompt_idx_tuple
             target_node = active_nodes[idx % len(active_nodes)]
@@ -144,9 +156,13 @@ class DistributedClusterManager:
                 except Exception as ex:
                     results.append({"success": False, "error": str(ex)})
 
+        succeeded = sum(1 for r in results if r.get("success"))
         return {
-            "success": True,
+            # A batch in which nothing rendered is not a successful batch.
+            "success": succeeded > 0,
             "total_prompts": len(prompts),
+            "succeeded": succeeded,
+            "failed": len(results) - succeeded,
             "cluster_nodes_utilized": len(active_nodes),
             "elapsed_seconds": round(time.time() - start_time, 2),
             "batch_results": results,

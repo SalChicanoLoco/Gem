@@ -157,6 +157,13 @@
             border-bottom-left-radius: 0.2rem;
         }
 
+        /* A failed turn must not look like an answer. */
+        .bubble-error {
+            background: rgba(245, 158, 11, 0.12);
+            border: 1px solid rgba(245, 158, 11, 0.4);
+            color: #f59e0b;
+        }
+
         /* Chips Bar */
         .chips-container {
             display: flex;
@@ -353,6 +360,23 @@
             return bubble;
         }
 
+        // One id for the life of this tab, so the server can carry the thread and a
+        // follow-up like "and why?" resolves against what was already said. Kept in
+        // sessionStorage so a reload continues the same conversation.
+        const CONVERSATION_ID = (function () {
+            let id = sessionStorage.getItem('gemmaConversationId');
+            if (!id) {
+                id = 'chat-' + Math.random().toString(36).slice(2, 10);
+                sessionStorage.setItem('gemmaConversationId', id);
+            }
+            return id;
+        })();
+
+        function showError(bubble, message) {
+            bubble.textContent = message;
+            bubble.classList.add('bubble-error');
+        }
+
         async function sendMessage() {
             const prompt = userInput.value.trim();
             if (!prompt) return;
@@ -364,56 +388,55 @@
             const botBubble = appendMessage('bot', '');
             botBubble.textContent = 'Thinking...';
 
-            try {
-                const eventSource = new EventSource(`${API_BASE}/api/gemma/stream?prompt=${encodeURIComponent(prompt)}`);
-                let responseText = '';
+            const url = `${API_BASE}/api/gemma/stream`
+                + `?prompt=${encodeURIComponent(prompt)}`
+                + `&conversation_id=${encodeURIComponent(CONVERSATION_ID)}`;
 
-                eventSource.onmessage = function(event) {
-                    if (event.data === '[DONE]') {
-                        eventSource.close();
-                        sendBtn.disabled = false;
-                        if (document.getElementById('autoTTSToggle')?.checked) {
-                            speakResponse(responseText);
-                        }
-                    } else {
-                        responseText += event.data + ' ';
-                        botBubble.textContent = responseText;
-                        messagesBox.scrollTop = messagesBox.scrollHeight;
+            try {
+                const eventSource = new EventSource(url);
+                let responseText = '';
+                let failed = false;
+
+                const finish = () => {
+                    eventSource.close();
+                    sendBtn.disabled = false;
+                    if (!failed && responseText && document.getElementById('autoTTSToggle')?.checked) {
+                        speakResponse(responseText);
                     }
                 };
 
-                eventSource.onerror = function() {
+                eventSource.onmessage = function (event) {
+                    if (event.data === '[DONE]') {
+                        finish();
+                        return;
+                    }
+                    let payload;
+                    try {
+                        payload = JSON.parse(event.data);
+                    } catch (e) {
+                        return;  // ignore a frame we cannot read rather than printing it
+                    }
+                    if (payload.error) {
+                        // The model is unreachable. Say so; do not leave the user
+                        // reading a plausible-looking answer that never happened.
+                        failed = true;
+                        showError(botBubble, `Gemma unavailable: ${payload.error}`);
+                        return;
+                    }
+                    responseText += payload.token || '';
+                    botBubble.textContent = responseText;
+                    messagesBox.scrollTop = messagesBox.scrollHeight;
+                };
+
+                eventSource.onerror = function () {
                     eventSource.close();
-                    if (!responseText) {
-                        fetchFallback(prompt, botBubble);
-                    } else {
-                        sendBtn.disabled = false;
-                        if (document.getElementById('autoTTSToggle')?.checked) {
-                            speakResponse(responseText);
-                        }
+                    sendBtn.disabled = false;
+                    if (!responseText && !failed) {
+                        showError(botBubble, 'Lost connection to the Gemma stream.');
                     }
                 };
             } catch (err) {
-                fetchFallback(prompt, botBubble);
-            }
-        }
-
-        async function fetchFallback(prompt, botBubble) {
-            try {
-                const res = await fetch(`${API_BASE}/api/gemma`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ action: 'generate', prompt })
-                });
-                const data = await res.json();
-                const resp = data.response || 'Inference processed successfully.';
-                botBubble.textContent = resp;
-                if (document.getElementById('autoTTSToggle')?.checked) {
-                    speakResponse(resp);
-                }
-            } catch (e) {
-                botBubble.textContent = 'Error connecting to Gemma engine.';
-            } finally {
+                showError(botBubble, `Could not open the Gemma stream: ${err}`);
                 sendBtn.disabled = false;
             }
         }

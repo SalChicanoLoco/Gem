@@ -9,7 +9,7 @@ import logging
 import time
 import traceback
 from typing import Any, Callable, Dict, Optional
-from .gemma_agent import GemmaAgent
+from .gemma_agent import GemmaAgent, GemmaUnavailable
 from .spine import get_spine
 
 logger = logging.getLogger(__name__)
@@ -98,9 +98,16 @@ class AutoHealer:
             f"Analyze the error and return a corrected payload in JSON format."
         )
 
-        response = self.gemma.generate(prompt, temperature=0.1)
-        parsed = GemmaAgent._extract_json(response)
         repaired = dict(payload)
+        parsed = None
+        try:
+            response = self.gemma.generate(prompt, temperature=0.1)
+            parsed = GemmaAgent._extract_json(response)
+        except GemmaUnavailable as e:
+            # This runs inside the caller's except block. Letting the model's
+            # unavailability propagate would replace the original task error with
+            # an unrelated one, so fall through to the heuristic repair below.
+            logger.warning("No model available to diagnose the failure (%s); applying heuristics only.", e)
 
         if parsed and isinstance(parsed, dict):
             for k, v in parsed.items():

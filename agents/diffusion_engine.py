@@ -22,7 +22,30 @@ logger = logging.getLogger(__name__)
 
 # Upper bound on denoising steps, capped to keep MPS runs inside a responsive
 # interactive budget. Requests above this are clamped and reported back.
-MAX_INFERENCE_STEPS = 19
+#
+# Was 19, sized against float32. Half precision cut the per-step cost roughly in
+# half without changing the image, so 50 steps now costs about what 19 did before
+# (~16s at 512x768). The budget is unchanged; the precision bought the steps.
+MAX_INFERENCE_STEPS = int(os.environ.get("MAX_INFERENCE_STEPS", "50"))
+
+# Models that render blank frames in half precision on MPS at any size, and so
+# default to float32 despite the speed cost. segmind/tiny-sd is distilled and its
+# activations evidently leave float16 range: measured at 512x512, 20 steps, it
+# produced a solid frame on 2 of 3 seeds in float16 and on 0 of 3 in float32,
+# where SD 1.5 was clean on every seed at that size.
+#
+# Size matters separately — see FP16_MIN_DIMENSION. SD 1.5 is not on this list
+# because it is fine in float16 from 384px up, but it does blank at 256px.
+# An explicit dtype= or $DIFFUSION_DTYPE still overrides both rules.
+FP16_UNSTABLE_ON_MPS = frozenset({"segmind/tiny-sd"})
+
+# Half precision also fails below a certain size, independently of the model.
+# Measured on SD 1.5 at 15 steps, seed 11: 256x256 renders a solid frame in
+# float16 and a correct one in float32, while 384x384 and 512x512 are clean in
+# both. Small latents evidently leave too little numerical headroom. Anything
+# under this on either axis falls back to float32, which costs little because
+# small renders are fast anyway.
+FP16_MIN_DIMENSION = 384
 
 MINIMAL_NEGATIVE_PROMPT = "blurry, lowres, distorted"
 
@@ -60,6 +83,42 @@ except ImportError:
         Image = None
 
 
+def _is_blank(image) -> bool:
+    """
+    True when a render carries no detail at all — a solid frame.
+
+    A blank image returned as a successful render is indistinguishable from a real
+    one to a caller that reads only ``success``. The NSFW classifier used to
+    produce these deliberately; half precision can produce them by accident when
+    a tensor goes non-finite. Either way the caller should be told.
+    """
+    try:
+        from PIL import ImageStat
+        return max(ImageStat.Stat(image.convert("RGB")).stddev) < 1.0
+    except Exception:  # pragma: no cover - never fail a good render on the check
+        return False
+
+
+def _find_lora_weight_file(lora_dir: str) -> Optional[str]:
+    """
+    Return the adapter weight filename inside a LoRA directory.
+
+    diffusers guesses this name by querying the Hub, which fails outright when
+    offline. Resolving it from the directory keeps local adapters loadable with
+    no network. Safetensors wins over .bin when both are present.
+    """
+    try:
+        names = os.listdir(lora_dir)
+    except OSError:
+        return None
+
+    for suffix in (".safetensors", ".bin"):
+        matches = sorted(n for n in names if n.endswith(suffix))
+        if matches:
+            return matches[0]
+    return None
+
+
 class PyTorchDiffusionEngine:
     """
     Local Diffusion Engine using PyTorch and Metal Performance Shaders (MPS).
@@ -70,6 +129,8 @@ class PyTorchDiffusionEngine:
         model_id: Optional[str] = None,
         use_mps: bool = True,
         lora_path: Optional[str] = None,
+        safety_checker: Optional[bool] = None,
+        dtype: Optional[str] = None,
     ):
         """
         Initialize the Diffusion Engine.
@@ -79,16 +140,61 @@ class PyTorchDiffusionEngine:
             use_mps: Whether to enable Apple Silicon MPS acceleration.
             lora_path: Directory holding LoRA adapter weights to apply on load,
                 as produced by LoRALocalTrainer. Defaults to $DEFAULT_LORA_PATH.
+            safety_checker: Load the NSFW classifier. Off by default; see
+                ENABLE_SAFETY_CHECKER below. Opt in with $ENABLE_SAFETY_CHECKER=true.
+            dtype: Inference precision override ("float16", "bfloat16", "float32").
+                Defaults to float16 on MPS and float32 elsewhere.
         """
-        self.model_id = model_id or os.environ.get("DEFAULT_SD_MODEL", "segmind/tiny-sd")
+        # SD 1.5 rather than tiny-sd: on the same seed and prompt tiny-sd renders
+        # unrecognisable subjects, and it is not even the faster option any more
+        # because it is pinned to float32 while SD 1.5 runs in half precision
+        # (measured 9.3s against 11.2s at 512x512, 50 steps).
+        self.model_id = model_id or os.environ.get("DEFAULT_SD_MODEL", "runwayml/stable-diffusion-v1-5")
         self.lora_path = lora_path or os.environ.get("DEFAULT_LORA_PATH") or None
         self.use_mps = use_mps and MPS_AVAILABLE
         self.device = "mps" if self.use_mps else ("cuda" if TORCH_AVAILABLE and torch.cuda.is_available() else "cpu")
+        # The bundled NSFW classifier blanks the image to solid black on a hit, and
+        # it hits on benign prompts: measured on this engine, "a portrait of a woman,
+        # desert light" was blanked on 2 of 3 seeds in float16 and 0 of 3 in float32,
+        # because its similarity thresholds are precision-sensitive. A silently
+        # black render is worse than no filter for a local single-user engine, and
+        # it made float16 unusable. Off unless explicitly enabled.
+        if safety_checker is None:
+            safety_checker = os.environ.get("ENABLE_SAFETY_CHECKER", "false").lower() == "true"
+        self.safety_checker = safety_checker
+        self.dtype_override = dtype or os.environ.get("DIFFUSION_DTYPE") or None
         self.pipe = None
         self.initialized = False
         self.active_lora: Optional[str] = None
         self.lora_error: Optional[str] = None
         logger.info(f"PyTorchDiffusionEngine configured with device: {self.device}")
+
+    def _inference_dtype(self, width: Optional[int] = None, height: Optional[int] = None):
+        """
+        Precision for inference.
+
+        float16 on MPS is ~2x faster than float32 for the same image: measured
+        3.5s against 7.1s at 19 steps, 512x512 on SD 1.5, with output statistics
+        matching to within a fraction of a percent. Training stays float32 (see
+        LoRALocalTrainer) because MPS autograd is unreliable in half precision;
+        this is inference only.
+
+        Not every model survives it — see FP16_UNSTABLE_ON_MPS. An explicit dtype
+        always wins, so that list sets a default rather than a restriction.
+        """
+        named = {"float16": torch.float16, "bfloat16": torch.bfloat16, "float32": torch.float32}
+        if self.dtype_override:
+            chosen = named.get(self.dtype_override.lower())
+            if chosen is not None:
+                return chosen
+            logger.warning("Unknown dtype %r; falling back to default.", self.dtype_override)
+        if self.device != "mps":
+            return torch.float32
+        if self.model_id in FP16_UNSTABLE_ON_MPS:
+            return torch.float32
+        if width is not None and height is not None and min(width, height) < FP16_MIN_DIMENSION:
+            return torch.float32
+        return torch.float16
 
     def _resolve_base_model(self, target_model: Optional[str]) -> Optional[str]:
         """
@@ -132,13 +238,19 @@ class PyTorchDiffusionEngine:
             "active_device": self.device,
             "acceleration_label": "Apple Silicon Metal GPU (MPS)" if self.device == "mps" else self.device.upper(),
             "model_id": self.model_id,
+            "dtype": str(self._inference_dtype()).replace("torch.", "") if TORCH_AVAILABLE else None,
+            "safety_checker": self.safety_checker,
             "lora": self.active_lora,
             "lora_error": self.lora_error,
             "initialized": self.initialized,
         }
 
     def initialize_pipeline(
-        self, target_model: Optional[str] = None, target_lora: Optional[str] = None
+        self,
+        target_model: Optional[str] = None,
+        target_lora: Optional[str] = None,
+        width: Optional[int] = None,
+        height: Optional[int] = None,
     ) -> bool:
         """
         Lazy initialization of the diffusion model pipeline.
@@ -147,6 +259,9 @@ class PyTorchDiffusionEngine:
             target_model: Load this model instead of the configured one.
             target_lora: Apply this LoRA adapter directory instead of the
                 configured one. Changing either forces a reload.
+            width, height: Requested output size. Precision depends on it (see
+                FP16_MIN_DIMENSION), so a size needing different precision than
+                the loaded pipeline forces a reload.
         """
         if target_lora is not None and target_lora != self.lora_path:
             self.lora_path = target_lora
@@ -159,6 +274,15 @@ class PyTorchDiffusionEngine:
             self.initialized = False
             self.pipe = None
 
+        required_dtype = self._inference_dtype(width, height)
+        if self.initialized and getattr(self, "active_dtype", None) != required_dtype:
+            logger.info("Reloading pipeline: %s needs %s, loaded as %s.",
+                        f"{width}x{height}" if width else "request",
+                        str(required_dtype).replace("torch.", ""),
+                        str(getattr(self, "active_dtype", None)).replace("torch.", ""))
+            self.initialized = False
+            self.pipe = None
+
         if self.initialized and self.pipe is not None:
             return True
 
@@ -167,11 +291,20 @@ class PyTorchDiffusionEngine:
             return False
 
         try:
-            dtype = torch.float32  # Use float32 on MPS to prevent Metal Performance Shaders memory assertions
-            logger.info(f"Loading diffusion pipeline {self.model_id} on {self.device}...")
+            dtype = required_dtype
+            self.active_dtype = dtype
+            logger.info(
+                "Loading diffusion pipeline %s on %s (%s, safety_checker=%s)...",
+                self.model_id, self.device, str(dtype).replace("torch.", ""),
+                "on" if self.safety_checker else "off",
+            )
+            load_kwargs: Dict[str, Any] = {"torch_dtype": dtype}
+            if not self.safety_checker:
+                load_kwargs["safety_checker"] = None
+                load_kwargs["requires_safety_checker"] = False
             self.pipe = AutoPipelineForText2Image.from_pretrained(
                 self.model_id,
-                torch_dtype=dtype,
+                **load_kwargs,
             )
             if hasattr(self.pipe, "scheduler") and hasattr(self.pipe.scheduler, "config"):
                 try:
@@ -201,9 +334,17 @@ class PyTorchDiffusionEngine:
                     logger.warning("Pipeline %s does not support LoRA weights.", self.model_id)
                 else:
                     try:
-                        self.pipe.load_lora_weights(self.lora_path)
+                        # diffusers will not guess the adapter filename when the
+                        # Hub is unreachable ("you must specify a `weight_name`"),
+                        # so name it explicitly and keep offline runs working.
+                        weight_name = _find_lora_weight_file(self.lora_path)
+                        if weight_name is None:
+                            raise FileNotFoundError(
+                                f"no .safetensors or .bin adapter file in {self.lora_path}"
+                            )
+                        self.pipe.load_lora_weights(self.lora_path, weight_name=weight_name)
                         self.active_lora = self.lora_path
-                        logger.info("Applied LoRA adapter from %s", self.lora_path)
+                        logger.info("Applied LoRA adapter %s from %s", weight_name, self.lora_path)
                     except Exception as lora_err:
                         # A bad adapter must not silently masquerade as the base model.
                         # Shape mismatches list every tensor; report the cause, not the list.
@@ -225,9 +366,12 @@ class PyTorchDiffusionEngine:
             logger.error(f"Failed to initialize PyTorch MPS diffusion pipeline ({self.model_id}): {e}")
             if self.model_id != "segmind/tiny-sd":
                 logger.info("Falling back to local 'segmind/tiny-sd' pipeline...")
-                self.model_id = "segmind/tiny-sd"
                 self.initialized = False
-                return self.initialize_pipeline()
+                # Pass the fallback as an explicit target. Assigning self.model_id
+                # and recursing bare lets _resolve_base_model override it back to
+                # the adapter's declared base on the next call, which loops until
+                # the stack blows.
+                return self.initialize_pipeline(target_model="segmind/tiny-sd")
             return False
 
     def generate(
@@ -243,6 +387,7 @@ class PyTorchDiffusionEngine:
         model_id: Optional[str] = None,
         quality_preset: bool = False,
         lora_path: Optional[str] = None,
+        seed: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
         Generate image using local diffusion, or a placeholder if no model loads.
@@ -285,7 +430,7 @@ class PyTorchDiffusionEngine:
             final_prompt = " ".join(words[:55])
 
         # Attempt hardware-accelerated generation if available
-        if self.initialize_pipeline(model_id, lora_path):
+        if self.initialize_pipeline(model_id, lora_path, width=width, height=height):
             try:
                 if self.device == "mps" and hasattr(torch, "mps") and hasattr(torch.mps, "empty_cache"):
                     try: torch.mps.empty_cache()
@@ -301,8 +446,12 @@ class PyTorchDiffusionEngine:
 
                 # Fix 3: Use CPU generator for stable seed noise initialization on MPS
                 generator = None
+                active_seed = None
                 if TORCH_AVAILABLE:
-                    generator = torch.Generator(device="cpu").manual_seed(int(time.time() * 1000) % 2147483647)
+                    # Reported back so any render can be reproduced, which is what
+                    # makes an A/B between two adapters or step counts meaningful.
+                    active_seed = int(time.time() * 1000) % 2147483647 if seed is None else int(seed)
+                    generator = torch.Generator(device="cpu").manual_seed(active_seed)
 
                 result = self.pipe(
                     prompt=final_prompt,
@@ -317,6 +466,52 @@ class PyTorchDiffusionEngine:
                 image.save(filepath)
                 elapsed = round(time.time() - start_time, 2)
 
+                blank = _is_blank(image)
+                recovered_in_float32 = False
+                if blank and self.active_dtype == torch.float16 and not self.dtype_override:
+                    # Half-precision blanking is intermittent, not just size-gated:
+                    # a real 512x512 render blanked in float16 on a prompt that had
+                    # rendered fine at other times. Rules that try to predict it
+                    # will always miss cases, so detect and recover instead. The
+                    # float32 cost is only paid on the failures.
+                    logger.warning(
+                        "Blank render in float16 for %r; retrying once in float32.", prompt[:60])
+                    self.dtype_override = "float32"
+                    try:
+                        self.initialized = False
+                        self.pipe = None
+                        if self.initialize_pipeline(width=width, height=height):
+                            retry = self.pipe(
+                                prompt=final_prompt,
+                                negative_prompt=active_neg_prompt,
+                                width=width,
+                                height=height,
+                                num_inference_steps=steps_used,
+                                guidance_scale=guidance_scale,
+                                generator=torch.Generator(device="cpu").manual_seed(active_seed)
+                                if TORCH_AVAILABLE else None,
+                            )
+                            candidate = retry.images[0]
+                            if not _is_blank(candidate):
+                                image = candidate
+                                image.save(filepath)
+                                blank = False
+                                recovered_in_float32 = True
+                                elapsed = round(time.time() - start_time, 2)
+                                logger.info("float32 retry produced a valid image for %r.", prompt[:60])
+                    finally:
+                        # Leave the engine on its normal default; the next request
+                        # should not silently inherit float32 from one bad render.
+                        self.dtype_override = None
+
+                if blank:
+                    logger.error(
+                        "Render for %r produced a blank image (model=%s, dtype=%s, safety_checker=%s), "
+                        "and the float32 retry did not help. Reported as blank_image rather than as a "
+                        "successful render.",
+                        prompt[:60], self.model_id, self.active_dtype, self.safety_checker,
+                    )
+
                 # Convert to Base64
                 buffer = io.BytesIO()
                 image.save(buffer, format="PNG")
@@ -328,6 +523,9 @@ class PyTorchDiffusionEngine:
                     "engine": "PyTorch MPS (Apple Silicon Metal GPU)",
                     "device": self.device,
                     "model_id": self.model_id,
+                    "dtype": str(self.active_dtype).replace("torch.", ""),
+                    "safety_checker": self.safety_checker,
+                    "blank_image": blank,
                     "lora": self.active_lora,
                     "lora_error": self.lora_error,
                     "prompt": prompt,
@@ -335,6 +533,7 @@ class PyTorchDiffusionEngine:
                     "prompt_truncated": truncated,
                     "steps_requested": num_inference_steps,
                     "steps_used": steps_used,
+                    "seed": active_seed,
                     "dimensions": {"width": width, "height": height},
                     "filepath": filepath,
                     "relative_url": f"/static/videos/{filename}",

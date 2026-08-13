@@ -301,6 +301,98 @@
             white-space: pre-wrap;
             margin-top: 1rem;
         }
+        /* Master switch: a physical throw switch rendered in CSS 3D.
+           Instrument-panel styling rather than a toy — machined metal, a recessed
+           rail, and a lever that actually travels through depth when thrown. */
+        .master-switch {
+            display: flex;
+            align-items: center;
+            gap: 0.7rem;
+            padding: 0.45rem 0.8rem 0.45rem 0.55rem;
+            border-radius: 0.6rem;
+            background: linear-gradient(180deg, rgba(30,41,59,0.9), rgba(10,15,25,0.95));
+            border: 1px solid rgba(148,163,184,0.22);
+            box-shadow: inset 0 1px 0 rgba(255,255,255,0.05), 0 6px 18px rgba(0,0,0,0.45);
+        }
+        .ms-rail {
+            perspective: 240px;
+            width: 62px;
+            height: 34px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            position: relative;
+        }
+        .ms-track {
+            position: absolute;
+            inset: 6px 2px;
+            border-radius: 999px;
+            background: linear-gradient(180deg, #05080f, #131c2b);
+            box-shadow: inset 0 2px 5px rgba(0,0,0,0.85), inset 0 -1px 0 rgba(255,255,255,0.04);
+        }
+        .ms-lever {
+            position: relative;
+            width: 26px;
+            height: 30px;
+            cursor: pointer;
+            transform-style: preserve-3d;
+            /* Down = off. The throw is a rotation about the rail, so the lever
+               genuinely pitches through depth rather than sliding sideways. */
+            transform: translateX(-14px) rotateX(38deg);
+            transition: transform 260ms cubic-bezier(.22,1.4,.36,1);
+            outline: none;
+        }
+        .ms-lever-face {
+            position: absolute;
+            inset: 0;
+            border-radius: 5px;
+            background: linear-gradient(150deg, #e2e8f0 0%, #94a3b8 42%, #64748b 60%, #cbd5e1 100%);
+            box-shadow: 0 3px 7px rgba(0,0,0,0.6), inset 0 1px 0 rgba(255,255,255,0.85);
+        }
+        /* Machined ridges, so the lever reads as a grip rather than a rectangle. */
+        .ms-lever-edge {
+            position: absolute;
+            inset: 5px 4px;
+            border-radius: 3px;
+            background: repeating-linear-gradient(
+                180deg, rgba(15,23,42,0.35) 0 1px, transparent 1px 4px);
+        }
+        .master-switch.on .ms-lever { transform: translateX(14px) rotateX(-38deg); }
+        .master-switch.on .ms-track {
+            background: linear-gradient(180deg, #052e1a, #0d5f37);
+            box-shadow: inset 0 2px 5px rgba(0,0,0,0.7), 0 0 12px rgba(34,197,94,0.35);
+        }
+        .master-switch.partial .ms-track {
+            background: linear-gradient(180deg, #3a2a05, #7a5308);
+            box-shadow: inset 0 2px 5px rgba(0,0,0,0.7), 0 0 12px rgba(245,158,11,0.3);
+        }
+        .master-switch.busy .ms-lever { transition-duration: 90ms; opacity: 0.75; }
+        .ms-lever:focus-visible .ms-lever-face { box-shadow: 0 0 0 2px var(--accent-cyan); }
+        .ms-readout { min-width: 116px; line-height: 1.15; }
+        .ms-state {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.72rem;
+            font-weight: 700;
+            letter-spacing: 0.09em;
+            color: #94a3b8;
+        }
+        .master-switch.on .ms-state { color: #22c55e; }
+        .master-switch.partial .ms-state { color: #f59e0b; }
+        .master-switch.off .ms-state { color: #64748b; }
+        .ms-detail {
+            font-size: 0.62rem;
+            color: var(--text-secondary);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            max-width: 190px;
+        }
+
+        /* A failed call must not read like console output from a working one. */
+        .output-console.console-error {
+            color: #f59e0b;
+            border-color: rgba(245, 158, 11, 0.4);
+        }
 
         /* Gauge & Metrics */
         .gauge-container {
@@ -586,6 +678,23 @@
                     <div class="hardware-dot"></div>
                     <span id="hardwareStatusText">Checking status…</span>
                 </div>
+
+                <!-- Master switch. Its position is driven by measured state, not by
+                     what was last clicked, so it cannot show ON over a dead stack. -->
+                <div class="master-switch" id="masterSwitch" title="Master power for the AI stack">
+                    <div class="ms-rail">
+                        <div class="ms-track"></div>
+                        <div class="ms-lever" id="msLever" role="switch" aria-checked="false"
+                             tabindex="0" aria-label="Master power">
+                            <div class="ms-lever-face"></div>
+                            <div class="ms-lever-edge"></div>
+                        </div>
+                    </div>
+                    <div class="ms-readout">
+                        <div class="ms-state" id="msState">CHECKING</div>
+                        <div class="ms-detail" id="msDetail">reading stack…</div>
+                    </div>
+                </div>
             </div>
         </header>
 
@@ -619,20 +728,20 @@
 
                         <div class="metrics-grid">
                             <div class="metric">
-                                <div class="metric-value" id="agentUtil">0%</div>
-                                <div class="metric-label">Agent Utilization</div>
+                                <div class="metric-value" id="inFlight">0</div>
+                                <div class="metric-label">Requests In Flight</div>
                             </div>
                             <div class="metric">
-                                <div class="metric-value" id="queuePressure">0%</div>
-                                <div class="metric-label">Queue Pressure</div>
+                                <div class="metric-value" id="cpuPercent">–</div>
+                                <div class="metric-label">Process CPU</div>
                             </div>
                             <div class="metric">
-                                <div class="metric-value" id="throughput">0</div>
-                                <div class="metric-label">Tasks/Min</div>
+                                <div class="metric-value" id="memoryMb">–</div>
+                                <div class="metric-label">Memory (MB)</div>
                             </div>
                             <div class="metric">
-                                <div class="metric-value" id="completedCount">0</div>
-                                <div class="metric-label">Completed Tasks</div>
+                                <div class="metric-value" id="longestRunning">0s</div>
+                                <div class="metric-label">Longest Running</div>
                             </div>
                         </div>
                     </div>
@@ -658,6 +767,7 @@
                             <button class="btn btn-primary" onclick="streamGemma()">Stream</button>
                             <button class="btn btn-secondary" onclick="runSelfOptimize()">Self-Optimize</button>
                             <button class="btn btn-secondary" onclick="speakConsole('gemmaConsole')" title="Read aloud console output">🔊 Speak</button>
+                            <button class="btn btn-secondary" onclick="resetGemmaConsole()" title="Forget this console's conversation history">🧹 New</button>
                         </div>
                         <div id="gemmaConsole" class="output-console">Ready to stream Gemma token reasoning...</div>
                     </div>
@@ -727,9 +837,9 @@
                     <div>
                         <label>Model Architecture</label>
                         <select id="photoModel">
-                            <option value="segmind/tiny-sd" selected>Tiny-SD (500MB Fast)</option>
-                            <option value="stabilityai/sdxl-turbo">SDXL Turbo (Realtime HD)</option>
-                            <option value="runwayml/stable-diffusion-v1-5">SD v1.5 (Classic HD)</option>
+                            <option value="runwayml/stable-diffusion-v1-5" selected>SD v1.5 (default, best quality)</option>
+                            <option value="segmind/tiny-sd">Tiny-SD (small, low quality)</option>
+                            <option value="stabilityai/sdxl-turbo">SDXL Turbo (untested here)</option>
                         </select>
                     </div>
                     <div>
@@ -762,14 +872,6 @@
                     <span style="font-size:0.75rem; color:var(--text-secondary);">Bypasses all automatic prompt expansions & subject locks for total raw artistic freedom.</span>
                 </div>
 
-                <div style="margin-bottom:1rem; background:rgba(30,41,59,0.5); padding:0.75rem; border-radius:0.5rem; border:1px solid var(--glass-border);">
-                    <label style="font-size:0.85rem; font-weight:600; color:var(--accent-cyan);">🦅 Fine-Tune Subject Anatomy & Model Weights (e.g. Roadrunner, Quetzal)</label>
-                    <div style="display:flex; gap:0.5rem; margin-top:0.35rem;">
-                        <input type="text" id="trainerSubjectInput" value="roadrunner" placeholder="Subject name (e.g. roadrunner, quetzal, wolf)">
-                        <button class="btn btn-cyan" onclick="runSubjectTrainer()">🦅 Ingest & Fine-Tune Subject</button>
-                    </div>
-                </div>
-
                 <div style="display:flex; gap:0.5rem;">
                     <button class="btn btn-pink" onclick="runPhotorealImage()">✨ Render Photorealistic Image (MPS GPU)</button>
                     <button class="btn btn-secondary" onclick="autoEnhancePhotoPrompt()">🧠 Gemma Auto-Enhance Prompt</button>
@@ -781,7 +883,7 @@
                         <div style="padding:1.5rem; border:2px dashed var(--glass-border); border-radius:0.75rem; color:var(--text-secondary); background:rgba(15,23,42,0.4);">
                             <div style="font-size:2rem; margin-bottom:0.5rem;">📸</div>
                             <div style="font-weight:600; color:var(--text-primary);">PyTorch MPS Studio Canvas Ready</div>
-                            <div style="font-size:0.8rem; margin-top:0.25rem;">Click '✨ Render Photorealistic Image (MPS GPU)' or '🦅 Ingest & Fine-Tune Subject' to generate custom artwork.</div>
+                            <div style="font-size:0.8rem; margin-top:0.25rem;">Click '✨ Render Photorealistic Image (MPS GPU)' to generate an image.</div>
                         </div>
                     </div>
                 </div>
@@ -1071,6 +1173,111 @@
             }
         }
 
+        // ---- Master switch -------------------------------------------------
+        // The lever position is set from measured state returned by /api/power,
+        // never from what was clicked. A switch that latched to the click would
+        // read ON over a dead model server, which is the failure this dashboard
+        // has spent its time removing.
+
+        let msBusy = false;
+
+        // Sound is synthesised rather than shipped as an asset: a relay clack for
+        // the throw, and a short rising tone when the stack confirms it is up.
+        function msSound(kind) {
+            if (!window.AudioContext && !window.webkitAudioContext) return;
+            if (document.getElementById('msMute')?.checked) return;
+            try {
+                const ctx = new (window.AudioContext || window.webkitAudioContext)();
+                const now = ctx.currentTime;
+                if (kind === 'clack') {
+                    // Filtered noise burst: the mechanical part of the throw.
+                    const len = Math.floor(ctx.sampleRate * 0.05);
+                    const buf = ctx.createBuffer(1, len, ctx.sampleRate);
+                    const data = buf.getChannelData(0);
+                    for (let i = 0; i < len; i++) data[i] = (Math.random() * 2 - 1) * (1 - i / len) ** 3;
+                    const src = ctx.createBufferSource(); src.buffer = buf;
+                    const bp = ctx.createBiquadFilter(); bp.type = 'bandpass';
+                    bp.frequency.value = 1800; bp.Q.value = 1.2;
+                    const g = ctx.createGain(); g.gain.value = 0.18;
+                    src.connect(bp).connect(g).connect(ctx.destination);
+                    src.start(now); src.stop(now + 0.06);
+                } else {
+                    const osc = ctx.createOscillator(); const g = ctx.createGain();
+                    osc.type = 'sine';
+                    osc.frequency.setValueAtTime(220, now);
+                    osc.frequency.exponentialRampToValueAtTime(660, now + 0.28);
+                    g.gain.setValueAtTime(0.0001, now);
+                    g.gain.exponentialRampToValueAtTime(0.12, now + 0.05);
+                    g.gain.exponentialRampToValueAtTime(0.0001, now + 0.42);
+                    osc.connect(g).connect(ctx.destination);
+                    osc.start(now); osc.stop(now + 0.45);
+                }
+                setTimeout(() => ctx.close(), 800);
+            } catch (e) { /* audio is decoration; never let it break the switch */ }
+        }
+
+        function msRender(data) {
+            const box = document.getElementById('masterSwitch');
+            const state = document.getElementById('msState');
+            const detail = document.getElementById('msDetail');
+            if (!box) return;
+
+            const s = data && data.state ? data.state : 'unknown';
+            box.classList.remove('on', 'off', 'partial');
+            box.classList.add(s === 'on' ? 'on' : s === 'partial' ? 'partial' : 'off');
+            document.getElementById('msLever')?.setAttribute('aria-checked', String(s === 'on'));
+
+            state.textContent = s === 'on' ? 'ONLINE'
+                : s === 'partial' ? 'PARTIAL' : s === 'off' ? 'OFFLINE' : 'UNKNOWN';
+
+            const c = (data && data.components) || {};
+            const down = Object.entries(c).filter(([, v]) => !v.up).map(([k]) => k.replace('_', ' '));
+            detail.textContent = s === 'on'
+                ? (c.model?.detail || 'all systems up')
+                : down.length ? `down: ${down.join(', ')}` : 'state unknown';
+            detail.title = Object.entries(c).map(([k, v]) => `${k}: ${v.detail}`).join('\n');
+        }
+
+        async function msRefresh() {
+            try {
+                const res = await fetch(`${API_BASE}/api/power`);
+                msRender(await res.json());
+            } catch (e) {
+                msRender({ state: 'unknown', components: {} });
+            }
+        }
+
+        async function msThrow() {
+            if (msBusy) return;
+            const box = document.getElementById('masterSwitch');
+            const goingOn = !box.classList.contains('on');
+            msBusy = true;
+            box.classList.add('busy');
+            msSound('clack');
+            document.getElementById('msState').textContent = goingOn ? 'STARTING' : 'STOPPING';
+            document.getElementById('msDetail').textContent = goingOn
+                ? 'bringing the stack up…' : 'releasing models…';
+
+            try {
+                const res = await fetch(`${API_BASE}/api/power`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ action: goingOn ? 'on' : 'off' })
+                });
+                const data = await res.json();
+                msRender(data);
+                // The wake tone only plays if the stack genuinely came up.
+                if (goingOn && data.state === 'on') msSound('wake');
+                if (data.actions) console.log('[master switch]', data.actions.join('; '));
+            } catch (e) {
+                msRender({ state: 'unknown', components: {} });
+                document.getElementById('msDetail').textContent = `switch failed: ${e.message}`;
+            } finally {
+                msBusy = false;
+                box.classList.remove('busy');
+            }
+        }
+
         function updateGauge(gauge) {
             const needle = document.getElementById('gaugeNeedle');
             const value = document.getElementById('loadValue');
@@ -1083,10 +1290,17 @@
         }
 
         function updateMetrics(metrics) {
-            document.getElementById('agentUtil').textContent = `${metrics.agent_utilization}%`;
-            document.getElementById('queuePressure').textContent = `${metrics.queue_pressure}%`;
-            document.getElementById('throughput').textContent = metrics.throughput_per_minute;
-            document.getElementById('completedCount').textContent = metrics.completed_tasks;
+            // Real process load. These replaced agent utilisation, queue pressure,
+            // tasks/min and completed tasks, all of which read from a task queue
+            // that nothing in the app enqueues to and so were permanently zero.
+            const dash = v => (v === null || v === undefined) ? '–' : v;
+            document.getElementById('inFlight').textContent = dash(metrics.in_flight);
+            document.getElementById('cpuPercent').textContent =
+                metrics.cpu_percent === null || metrics.cpu_percent === undefined
+                    ? '–' : `${metrics.cpu_percent}%`;
+            document.getElementById('memoryMb').textContent = dash(metrics.memory_mb);
+            document.getElementById('longestRunning').textContent =
+                `${dash(metrics.longest_running_seconds)}s`;
         }
 
         function updateAgents(agents) {
@@ -1149,7 +1363,7 @@
         // Photorealistic Image Studio
         async function runPhotorealImage() {
             const prompt = document.getElementById('photoPrompt').value;
-            const modelId = document.getElementById('photoModel')?.value || 'segmind/tiny-sd';
+            const modelId = document.getElementById('photoModel')?.value || 'runwayml/stable-diffusion-v1-5';
             const [width, height] = document.getElementById('photoRes').value.split('x').map(Number);
             const steps = Number(document.getElementById('photoSteps').value);
             const negPrompt = document.getElementById('photoNegPrompt')?.value;
@@ -1167,16 +1381,35 @@
                     body: JSON.stringify({ prompt, width, height, num_inference_steps: steps, negative_prompt: negPrompt, raw_mode: isRaw, model_id: modelId })
                 });
                 const data = await res.json();
-                consoleBox.textContent = `Engine: ${data.engine}\nModel: ${data.model_id || modelId} | Device: ${data.device || 'mps'} | Raw Mode: ${isRaw ? 'Active' : 'Disabled'}\n` + JSON.stringify(data.dimensions, null, 2);
-                if (data.placeholder) {
-                    consoleBox.textContent = `⚠️ PLACEHOLDER - no diffusion model loaded. This is a gradient, not a render.\n` + consoleBox.textContent;
+                // Report what the engine actually did, not what was requested:
+                // the step count can be clamped, the adapter can be refused, and
+                // the seed is what makes a render reproducible.
+                const lines = [
+                    `Engine: ${data.engine}`,
+                    `Model: ${data.model_id || modelId} | Device: ${data.device || 'mps'} | Precision: ${data.dtype || 'unknown'}`,
+                    `Steps: ${data.steps_used} used of ${data.steps_requested} requested`
+                        + (data.steps_used < data.steps_requested ? '  (clamped)' : ''),
+                    `Seed: ${data.seed}  (pass this seed to reproduce exactly)`,
+                    `Size: ${data.dimensions?.width}x${data.dimensions?.height} | Raw mode: ${isRaw ? 'Active' : 'Disabled'}`,
+                    `LoRA: ${data.lora || 'none'}`,
+                    `Time: ${data.inference_time_seconds}s`,
+                ];
+                if (data.lora_error) {
+                    lines.unshift(`⚠️ Adapter not applied: ${data.lora_error}`);
                 }
+                if (data.blank_image) {
+                    lines.unshift('⚠️ BLANK IMAGE - the render carries no detail. This is not a usable result.');
+                }
+                if (data.placeholder) {
+                    lines.unshift('⚠️ PLACEHOLDER - no diffusion model loaded. This is a gradient, not a render.');
+                }
+                consoleBox.textContent = lines.join('\n');
 
                 const imgSrc = data.base64 ? `data:image/png;base64,${data.base64}` : (data.relative_url ? `${API_BASE}${data.relative_url}` : '');
                 if (imgSrc) {
                     previewBox.innerHTML = `<img src="${imgSrc}" style="max-width:100%; max-height:480px; border-radius:0.75rem; border:2px solid var(--accent-pink); box-shadow:0 8px 32px rgba(236,72,153,0.4);" alt="Photorealistic Artwork">`;
                 } else {
-                    previewBox.innerHTML = '<div style="color:var(--warning);">Image synthesized cleanly, asset saved to static/videos.</div>';
+                    previewBox.innerHTML = '<div style="color:var(--warning);">No image data came back in the response. Check the console output above.</div>';
                 }
 
                 if (document.getElementById('autoTTSCheck')?.checked) {
@@ -1240,27 +1473,48 @@
                 });
                 const data = await res.json();
                 
+                // Report the stages the run actually reported.
+                //
+                // This loop used to mark all four "✅ Evolved" unconditionally,
+                // before looking at the response, so a cycle that did nothing (or
+                // was blocked by the BoundaryGuard) still lit up green. The summary
+                // then filled every missing field with an invented value: a "3.4x
+                // throughput speedup" that nothing measured — the same figure
+                // e034558 deleted from the backend — plus "Completed", "Approved"
+                // and a tool filename. Absent data now reads as absent.
+                const report = data.evolution_report || {};
+                const stages = report.stages || {};
+                const stageKeys = ['gemma_optimization', 'tool_synthesized', 'debate_consensus', 'auto_healer_status'];
+
                 for (let i = 1; i <= 4; i++) {
                     const card = document.getElementById(`evoStage${i}`);
                     const status = document.getElementById(`evoStage${i}Status`);
-                    if (card) { card.className = 'evo-stage-card done'; }
-                    if (status) { status.textContent = '✅ Evolved'; status.style.color = 'var(--success)'; }
+                    const value = stages[stageKeys[i - 1]];
+                    const ran = value !== undefined && value !== null;
+                    if (card) { card.className = ran ? 'evo-stage-card done' : 'evo-stage-card'; }
+                    if (status) {
+                        status.textContent = ran ? '✅ Ran' : '— not reported';
+                        status.style.color = ran ? 'var(--success)' : 'var(--text-secondary)';
+                    }
                 }
 
-                const report = data.evolution_report || {};
+                const show = v => (v === undefined || v === null) ? 'not reported' : JSON.stringify(v);
                 const summaryText = (
-                    `Cycle ID: ${data.cycle_id || 'evo_active'}\n` +
-                    `Status: EVOLVED (Efficiency Gain: ${report.efficiency_gain || '3.4x throughput speedup'})\n\n` +
-                    `Stage 1 Gemma Optimization: ${JSON.stringify(report.stages?.gemma_optimization || 'Completed')}\n` +
-                    `Stage 2 Synthesized Tool: ${report.stages?.tool_synthesized || 'evo_tool.py'}\n` +
-                    `Stage 3 Debate Consensus: ${report.stages?.debate_consensus || 'Approved'}\n` +
-                    `Stage 4 AutoHealer Status: Verified (${report.stages?.auto_healer_status ? 'Passed' : 'Repaired'})\n\n` +
+                    `Cycle ID: ${data.cycle_id || 'not reported'}\n` +
+                    `Success: ${data.success}\n` +
+                    `Efficiency gain: ${report.efficiency_gain === undefined ? 'not measured' : report.efficiency_gain}\n\n` +
+                    `Stage 1 Gemma optimization: ${show(stages.gemma_optimization)}\n` +
+                    `Stage 2 Synthesized tool:   ${show(stages.tool_synthesized)}\n` +
+                    `Stage 3 Debate consensus:   ${show(stages.debate_consensus)}\n` +
+                    `Stage 4 AutoHealer status:  ${show(stages.auto_healer_status)}\n\n` +
                     `Full Execution Report:\n` + JSON.stringify(data, null, 2)
                 );
                 consoleBox.textContent = summaryText;
 
                 if (document.getElementById('autoTTSCheck')?.checked) {
-                    speakText(`Autonomous evolution cycle completed successfully for ${goal.substring(0, 40)}. Efficiency speedup 3.4x achieved.`);
+                    speakText(data.success === false
+                        ? `Evolution cycle failed for ${goal.substring(0, 40)}.`
+                        : `Evolution cycle finished for ${goal.substring(0, 40)}. See the console for what each stage reported.`);
                 }
             } catch (err) {
                 consoleBox.textContent = `[Evolution Error] ${err.message}`;
@@ -1322,34 +1576,6 @@
                 }
             } catch (err) {
                 consoleBox.textContent = `[Ingest Error] ${err.message}`;
-            }
-        }
-
-        async function runSubjectTrainer() {
-            const subject = document.getElementById('trainerSubjectInput')?.value || 'roadrunner';
-            const consoleBox = document.getElementById('photoConsole') || document.getElementById('trainerConsole');
-
-            if (consoleBox) consoleBox.textContent = `[Subject Trainer] Fetching reference dataset & fine-tuning model weights for "${subject}"...`;
-
-            try {
-                const res = await fetch(`${API_BASE}/api/trainer/subject`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ subject: subject })
-                });
-                const data = await res.json();
-                if (consoleBox) consoleBox.textContent = JSON.stringify(data, null, 2);
-
-                if (document.getElementById('autoTTSCheck')?.checked) {
-                    speakText(`Successfully fine-tuned model weights for ${subject}. Re-rendering image...`);
-                }
-
-                const photoInput = document.getElementById('photoPrompt');
-                if (photoInput && photoInput.value.includes(subject)) {
-                    runPhotorealImage();
-                }
-            } catch (err) {
-                if (consoleBox) consoleBox.textContent = `[Subject Trainer Error] ${err.message}`;
             }
         }
 
@@ -1445,29 +1671,77 @@
             }
         }
 
-        async function streamGemma() {
+        // Shared with the chat page in spirit: one id per tab, so the console is a
+        // conversation rather than a series of unrelated one-shots.
+        const GEMMA_CONSOLE_CONVERSATION = (function () {
+            let id = sessionStorage.getItem('gemmaConsoleConversationId');
+            if (!id) {
+                id = 'console-' + Math.random().toString(36).slice(2, 10);
+                sessionStorage.setItem('gemmaConsoleConversationId', id);
+            }
+            return id;
+        })();
+
+        // Named streamGemma and now actually streams. It previously awaited the
+        // whole completion and printed it in one go.
+        function streamGemma() {
             const prompt = document.getElementById('gemmaPrompt').value;
             const consoleBox = document.getElementById('gemmaConsole');
-            consoleBox.textContent = 'Connecting to Gemma 2 reasoning engine...\n';
+            consoleBox.classList.remove('console-error');
+            consoleBox.textContent = '';
 
-            try {
-                const res = await fetch(`${API_BASE}/v1/chat/completions`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        model: 'gemma2:2b',
-                        messages: [{ role: 'user', content: prompt }]
-                    })
-                });
-                const data = await res.json();
-                const content = data.choices[0].message.content;
-                consoleBox.textContent = content;
-                if (document.getElementById('autoTTSCheck')?.checked) {
-                    speakText(content);
+            const url = `${API_BASE}/api/gemma/stream`
+                + `?prompt=${encodeURIComponent(prompt)}`
+                + `&conversation_id=${encodeURIComponent(GEMMA_CONSOLE_CONVERSATION)}`;
+
+            let text = '';
+            let failed = false;
+            const source = new EventSource(url);
+
+            source.onmessage = function (event) {
+                if (event.data === '[DONE]') {
+                    source.close();
+                    if (!failed && text && document.getElementById('autoTTSCheck')?.checked) {
+                        speakText(text);
+                    }
+                    return;
                 }
-            } catch (err) {
-                consoleBox.textContent = `Error: ${err.message}`;
-            }
+                let payload;
+                try {
+                    payload = JSON.parse(event.data);
+                } catch (e) {
+                    return;
+                }
+                if (payload.error) {
+                    failed = true;
+                    consoleBox.classList.add('console-error');
+                    consoleBox.textContent = `Gemma unavailable: ${payload.error}`;
+                    return;
+                }
+                text += payload.token || '';
+                consoleBox.textContent = text;
+                consoleBox.scrollTop = consoleBox.scrollHeight;
+            };
+
+            source.onerror = function () {
+                source.close();
+                if (!text && !failed) {
+                    consoleBox.classList.add('console-error');
+                    consoleBox.textContent = 'Lost connection to the Gemma stream.';
+                }
+            };
+        }
+
+        function resetGemmaConsole() {
+            fetch(`${API_BASE}/api/gemma`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ action: 'reset', conversation_id: GEMMA_CONSOLE_CONVERSATION })
+            }).then(() => {
+                const consoleBox = document.getElementById('gemmaConsole');
+                consoleBox.classList.remove('console-error');
+                consoleBox.textContent = 'Conversation cleared.';
+            });
         }
 
         async function runSelfOptimize() {
@@ -1482,7 +1756,11 @@
             const text = JSON.stringify(data, null, 2);
             consoleBox.textContent = text;
             if (document.getElementById('autoTTSCheck')?.checked) {
-                speakText(`Gemma Meta-Orchestrator optimization complete. System health is optimal.`);
+                // Say what came back. The previous line spoke "System health is
+                // optimal" unconditionally, including when the call had failed.
+                speakText(data.success === false
+                    ? `Optimization failed: ${data.error || 'unknown error'}`
+                    : 'Meta-Orchestrator optimization complete. See the console for the result.');
             }
         }
 
@@ -1726,10 +2004,23 @@
         }
 
         // Init
+        (function wireMasterSwitch() {
+            const lever = document.getElementById('msLever');
+            if (!lever) return;
+            lever.addEventListener('click', msThrow);
+            lever.addEventListener('keydown', e => {
+                if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); msThrow(); }
+            });
+        })();
+
         fetchDashboard();
         fetchHardwareStatus();
+        msRefresh();
         setInterval(fetchDashboard, 5000);
         setInterval(fetchHardwareStatus, 15000);
+        // Polled independently so the lever tracks the stack even when something
+        // else stops Ollama from outside the dashboard.
+        setInterval(() => { if (!msBusy) msRefresh(); }, 10000);
         initVocalEngine();
     </script>
 
@@ -1794,44 +2085,53 @@
             msg.innerHTML = `<strong>${sender}:</strong> ${escapeHtml(text)}`;
             box.appendChild(msg);
             box.scrollTop = box.scrollHeight;
+            return msg;
         }
 
+        // Feedback goes to the model and comes back as the model's words.
+        //
+        // This previously matched keywords in the feedback and, on a hit, replaced
+        // the negative prompt with a fixed string and appended "solo 1person,
+        // single subject, centered composition, anatomically correct body
+        // structure" to whatever the user had typed — human-anatomy tokens that
+        // fight any prompt about an animal. It then claimed "Negative prompt
+        // weights updated with strict single-subject & body integrity locks",
+        // which describes a mechanism that does not exist, and the model was never
+        // consulted. The engine had the same keyword rewriting removed in
+        // e034558; this was the surviving copy.
         async function processFeedback(feedbackText) {
-            appendFeedbackMsg('Gemma', 'Processing feedback & auto-correcting negative prompt weights...');
-            
-            if (feedbackText.toLowerCase().includes('anatomy') || feedbackText.toLowerCase().includes('head') || feedbackText.toLowerCase().includes('body') || feedbackText.toLowerCase().includes('image') || feedbackText.toLowerCase().includes('solo') || feedbackText.toLowerCase().includes('negative') || feedbackText.toLowerCase().includes('fix')) {
-                const photoInput = document.getElementById('photoPrompt');
-                const photoNeg = document.getElementById('photoNegPrompt');
-                
-                if (photoNeg) {
-                    photoNeg.value = "multiple subjects, multiple people, multiple heads, merged bodies, fused torsos, extra limbs, extra heads, duplicate bodies, bad anatomy, deformed limbs, disfigured, malformed body, mutated hands, bad proportions, distorted faces, overlapping bodies, double head, extra arms, extra legs, missing limbs, blurry, cartoon";
-                }
-                if (photoInput && !photoInput.value.includes('solo 1person')) {
-                    photoInput.value = `${photoInput.value}, solo 1person, single subject, centered composition, anatomically correct body structure`;
-                }
+            const promptBox = document.getElementById('photoPrompt');
+            const context = promptBox && promptBox.value
+                ? `The current image prompt is: "${promptBox.value}".`
+                : 'No image prompt is set yet.';
 
-                appendFeedbackMsg('Gemma', '✅ Negative prompt weights updated with strict single-subject & body integrity locks! Re-rendering image...');
-                switchTab('tab-photo');
-                runPhotorealImage();
-            } else {
-                try {
-                    const res = await fetch(`${API_BASE}/v1/chat/completions`, {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({
-                            model: 'gemma2:2b',
-                            messages: [{ role: 'user', content: `Feedback received: ${feedbackText}. Provide a concise 1-sentence action plan.` }]
-                        })
-                    });
-                    const data = await res.json();
-                    const reply = data.choices[0].message.content;
-                    appendFeedbackMsg('Gemma', reply);
-                    if (document.getElementById('autoTTSCheck')?.checked) {
-                        speakText(reply);
-                    }
-                } catch(e) {
-                    appendFeedbackMsg('Gemma', 'Feedback recorded. Pipeline weights adjusted.');
+            const bubble = appendFeedbackMsg('Gemma', 'Thinking...');
+
+            try {
+                const res = await fetch(`${API_BASE}/api/gemma`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        action: 'chat',
+                        conversation_id: 'dashboard-feedback',
+                        message: `${context}\nThe user's critique of the rendered image: "${feedbackText}".\n`
+                            + 'Reply with an improved image prompt on a single line, then one short sentence '
+                            + 'explaining the change. Do not invent details the user did not ask for.'
+                    })
+                });
+                const data = await res.json();
+                if (!data.success) {
+                    bubble.innerHTML = `<strong>Gemma:</strong> ${escapeHtml('Unavailable: ' + (data.error || 'unknown error'))}`;
+                    return;
                 }
+                bubble.innerHTML = `<strong>Gemma:</strong> ${escapeHtml(data.response)}`;
+                if (document.getElementById('autoTTSCheck')?.checked) {
+                    speakText(data.response);
+                }
+            } catch (e) {
+                // Say what happened. "Feedback recorded. Pipeline weights adjusted."
+                // used to appear here, and nothing was recorded or adjusted.
+                bubble.innerHTML = `<strong>Gemma:</strong> ${escapeHtml('Could not reach the API: ' + e.message)}`;
             }
         }
     </script>

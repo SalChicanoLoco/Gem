@@ -34,20 +34,22 @@ class TestArtAgentInit:
 class TestAestheticAnalysis:
     """Tests for aesthetic analysis."""
 
-    def test_analyze_with_image_url(self, agent):
-        """Test analysis with image URL."""
+    def test_analyze_refuses_rather_than_scoring_an_unseen_image(self, agent):
+        """
+        There is no vision model in this build. Scores were previously derived
+        from an MD5 of the image URL, so a URL that did not exist still received
+        composition, colour-harmony and lighting numbers.
+        """
         result = agent.analyze_aesthetics({"image_url": "https://example.com/image.jpg"})
-        assert result["success"] is True
-        assert result["mock"] is True
-        assert "aesthetic_scores" in result
-        assert "overall" in result["aesthetic_scores"]
+        assert result["success"] is False
+        assert result["analysed"] is False
+        assert "not implemented" in result["error"]
 
-    def test_analyze_with_base64(self, agent):
-        """Test analysis with base64 image data."""
+    def test_analyze_returns_no_scores_at_all(self, agent):
+        """A refusal must not carry score-shaped fields a caller could read."""
         result = agent.analyze_aesthetics({"image_base64": "base64encodeddata"})
-        assert result["success"] is True
-        assert "style_classification" in result
-        assert "mood" in result
+        for key in ("aesthetic_scores", "style_classification", "mood", "dominant_colors"):
+            assert key not in result
 
     def test_analyze_without_image(self, agent):
         """Test analysis without image data returns error."""
@@ -55,12 +57,6 @@ class TestAestheticAnalysis:
         assert result["success"] is False
         assert "error" in result
 
-    def test_analyze_returns_colors(self, agent):
-        """Test that analysis returns dominant colors."""
-        result = agent.analyze_aesthetics({"image_url": "https://example.com/test.jpg"})
-        assert "dominant_colors" in result
-        assert len(result["dominant_colors"]) > 0
-        assert "hex" in result["dominant_colors"][0]
 
 
 class TestImageSets:
@@ -175,8 +171,8 @@ class TestStyleTransfer:
             target_style="impressionist",
             intensity=0.8,
         )
-        assert result["success"] is True
-        assert result["mock"] is True
+        assert result["success"] is False
+        assert "not implemented" in result["error"]
         assert result["target_style"] == "impressionist"
 
     def test_style_transfer_without_image(self, agent):
