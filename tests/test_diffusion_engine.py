@@ -6,7 +6,12 @@ import os
 import tempfile
 import unittest
 from unittest.mock import patch, MagicMock
-from agents.diffusion_engine import MAX_INFERENCE_STEPS, PyTorchDiffusionEngine, _is_blank
+from agents.diffusion_engine import (
+    MAX_INFERENCE_STEPS,
+    PyTorchDiffusionEngine,
+    _find_lora_weight_file,
+    _is_blank,
+)
 from agents.lora_trainer import read_adapter_meta, write_adapter_meta
 from agents import ImageAgent
 
@@ -189,6 +194,60 @@ class TestAdapterBaseModelResolution(unittest.TestCase):
 
         self.assertIsNone(self.engine._resolve_base_model(None))
         self.assertIsNone(self.engine.lora_error)
+
+    def test_failing_load_with_adapter_does_not_recurse_forever(self):
+        """
+        The tiny-sd fallback and the adapter's declared base used to fight: the
+        fallback set model_id, then _resolve_base_model overrode it back to the
+        adapter's base on the next call, looping until the stack blew.
+        """
+        write_adapter_meta(self.adapter, {"base_model_id": "runwayml/stable-diffusion-v1-5"})
+        self.engine.lora_path = self.adapter
+        self.engine.model_id = "models/sd15"
+
+        with patch("agents.diffusion_engine.AutoPipelineForText2Image") as auto:
+            auto.from_pretrained.side_effect = OSError("model is not cached locally")
+            result = self.engine.initialize_pipeline()
+
+        self.assertFalse(result)
+        self.assertEqual(self.engine.model_id, "segmind/tiny-sd")
+
+
+class TestLoraWeightFileResolution(unittest.TestCase):
+    """
+    diffusers refuses to guess the adapter filename when the Hub is unreachable,
+    so the engine resolves it from the directory instead.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.d = self.tmp.name
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _touch(self, name):
+        open(os.path.join(self.d, name), "w").close()
+
+    def test_finds_safetensors(self):
+        self._touch("pytorch_lora_weights.safetensors")
+        self.assertEqual(_find_lora_weight_file(self.d), "pytorch_lora_weights.safetensors")
+
+    def test_prefers_safetensors_over_bin(self):
+        self._touch("pytorch_lora_weights.bin")
+        self._touch("pytorch_lora_weights.safetensors")
+        self.assertEqual(_find_lora_weight_file(self.d), "pytorch_lora_weights.safetensors")
+
+    def test_falls_back_to_bin(self):
+        self._touch("pytorch_lora_weights.bin")
+        self.assertEqual(_find_lora_weight_file(self.d), "pytorch_lora_weights.bin")
+
+    def test_returns_none_when_no_weights(self):
+        self._touch("adapter_meta.json")
+        self.assertIsNone(_find_lora_weight_file(self.d))
+
+    def test_missing_directory_returns_none(self):
+        self.assertIsNone(_find_lora_weight_file(os.path.join(self.d, "nope")))
 
 
 if __name__ == "__main__":

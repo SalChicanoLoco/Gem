@@ -99,6 +99,26 @@ def _is_blank(image) -> bool:
         return False
 
 
+def _find_lora_weight_file(lora_dir: str) -> Optional[str]:
+    """
+    Return the adapter weight filename inside a LoRA directory.
+
+    diffusers guesses this name by querying the Hub, which fails outright when
+    offline. Resolving it from the directory keeps local adapters loadable with
+    no network. Safetensors wins over .bin when both are present.
+    """
+    try:
+        names = os.listdir(lora_dir)
+    except OSError:
+        return None
+
+    for suffix in (".safetensors", ".bin"):
+        matches = sorted(n for n in names if n.endswith(suffix))
+        if matches:
+            return matches[0]
+    return None
+
+
 class PyTorchDiffusionEngine:
     """
     Local Diffusion Engine using PyTorch and Metal Performance Shaders (MPS).
@@ -314,9 +334,17 @@ class PyTorchDiffusionEngine:
                     logger.warning("Pipeline %s does not support LoRA weights.", self.model_id)
                 else:
                     try:
-                        self.pipe.load_lora_weights(self.lora_path)
+                        # diffusers will not guess the adapter filename when the
+                        # Hub is unreachable ("you must specify a `weight_name`"),
+                        # so name it explicitly and keep offline runs working.
+                        weight_name = _find_lora_weight_file(self.lora_path)
+                        if weight_name is None:
+                            raise FileNotFoundError(
+                                f"no .safetensors or .bin adapter file in {self.lora_path}"
+                            )
+                        self.pipe.load_lora_weights(self.lora_path, weight_name=weight_name)
                         self.active_lora = self.lora_path
-                        logger.info("Applied LoRA adapter from %s", self.lora_path)
+                        logger.info("Applied LoRA adapter %s from %s", weight_name, self.lora_path)
                     except Exception as lora_err:
                         # A bad adapter must not silently masquerade as the base model.
                         # Shape mismatches list every tensor; report the cause, not the list.
@@ -338,9 +366,12 @@ class PyTorchDiffusionEngine:
             logger.error(f"Failed to initialize PyTorch MPS diffusion pipeline ({self.model_id}): {e}")
             if self.model_id != "segmind/tiny-sd":
                 logger.info("Falling back to local 'segmind/tiny-sd' pipeline...")
-                self.model_id = "segmind/tiny-sd"
                 self.initialized = False
-                return self.initialize_pipeline()
+                # Pass the fallback as an explicit target. Assigning self.model_id
+                # and recursing bare lets _resolve_base_model override it back to
+                # the adapter's declared base on the next call, which loops until
+                # the stack blows.
+                return self.initialize_pipeline(target_model="segmind/tiny-sd")
             return False
 
     def generate(
