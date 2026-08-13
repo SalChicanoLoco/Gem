@@ -95,3 +95,6 @@ extensions/*.py
 # out explicitly. Never tracked: it is other people's bytes.
 downloads/
 config/render_calibration.json
+
+# Pinned local model export for offline use (4GB)
+models/
